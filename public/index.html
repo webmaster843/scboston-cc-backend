@@ -408,6 +408,19 @@ async function runMembershipSync() {
   }
 
   if (totalPushed > 0) {
+    log('mem-log', 'Updating membership sheet...');
+    try {
+      const sheetResp = await fetch(BACKEND + '/sync-membership-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ membershipData: S.memData })
+      });
+      const sheetData = await sheetResp.json();
+      if (sheetData.success) log('mem-log', 'Membership sheet updated.', 'ok');
+      else log('mem-log', 'Sheet update failed: ' + JSON.stringify(sheetData), 'warn');
+    } catch(e) {
+      log('mem-log', 'Sheet update error: ' + e.message, 'warn');
+    }
     showStatus('mem-status', `Sync complete. ${totalPushed} contacts pushed to Constant Contact.${skippedTypes ? ' ' + skippedTypes + ' types skipped (no list ID).':''}`, 'success');
   } else {
     showStatus('mem-status', 'No contacts were pushed. Check the log below for details.', 'error');
@@ -431,6 +444,19 @@ async function runAcademySync() {
 
   if (pushed > 0) {
     newEmails.forEach(e => S.acadSynced.add(e));
+    log('acad-log', 'Updating academy sheet...');
+    try {
+      const sheetResp = await fetch(BACKEND + '/sync-academy-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ syncedCount: pushed })
+      });
+      const sheetData = await sheetResp.json();
+      if (sheetData.success) log('acad-log', 'Academy sheet updated.', 'ok');
+      else log('acad-log', 'Sheet update failed: ' + JSON.stringify(sheetData), 'warn');
+    } catch(e) {
+      log('acad-log', 'Sheet update error: ' + e.message, 'warn');
+    }
     showStatus('acad-status', `Sync complete. ${pushed} new emails pushed. ${S.acadSynced.size} total synced this session.`, 'success');
   } else {
     showStatus('acad-status', 'No emails were pushed. Check the log below for details.', 'error');
