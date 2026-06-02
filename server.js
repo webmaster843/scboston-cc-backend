@@ -55,6 +55,20 @@ app.get('/token', async (req, res) => {
   }
 });
 
+app.get('/lists', async (req, res) => {
+  try {
+    const token = await getValidToken();
+    const resp = await fetch('https://api.cc.email/v3/contact_lists?include_count=true', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    const data = await resp.json();
+    const lists = data.lists.map(l => ({ name: l.name, id: l.list_id, count: l.membership_count }));
+    res.json(lists);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/callback', async (req, res) => {
   const code = req.query.code;
   if (!code) return res.status(400).send('No code provided');
