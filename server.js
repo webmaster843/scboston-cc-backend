@@ -69,6 +69,28 @@ app.get('/lists', async (req, res) => {
   }
 });
 
+app.post('/import', async (req, res) => {
+  try {
+    const token = await getValidToken();
+    const { contacts, list_id } = req.body;
+    const resp = await fetch('https://api.cc.email/v3/activities/contact_imports', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        contacts: contacts,
+        list_id: list_id
+      })
+    });
+    const data = await resp.json();
+    res.status(resp.status).json(data);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/callback', async (req, res) => {
   const code = req.query.code;
   if (!code) return res.status(400).send('No code provided');
