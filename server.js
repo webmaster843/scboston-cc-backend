@@ -1,10 +1,12 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const path = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
 
 const CC_API_KEY = process.env.CC_API_KEY;
 const CC_CLIENT_SECRET = process.env.CC_CLIENT_SECRET;
@@ -76,11 +78,7 @@ app.post('/import', async (req, res) => {
     console.log('Import request - list_id:', list_id);
     console.log('Import request - contact count:', contacts.length);
     console.log('Import request - first contact:', JSON.stringify(contacts[0]));
-    const payload = {
-      contacts: contacts,
-      list_id: list_id
-    };
-    console.log('Payload sample:', JSON.stringify(payload).substring(0, 300));
+    const payload = { contacts, list_id };
     const resp = await fetch('https://api.cc.email/v3/activities/contact_imports', {
       method: 'POST',
       headers: {
