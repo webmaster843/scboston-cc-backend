@@ -16,6 +16,7 @@ const RENDER_API_KEY = process.env.RENDER_API_KEY;
 const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID;
 const MEMBERSHIP_SHEET_ID = process.env.MEMBERSHIP_SHEET_ID;
 const ACADEMY_SHEET_ID = process.env.ACADEMY_SHEET_ID;
+const ACADEMY_LIST_ID = '132ca7fe-47cb-11f1-bdf1-02420a320003';
 
 let storedTokens = {
   access_token: '',
@@ -25,16 +26,14 @@ let storedTokens = {
 
 function getGoogleAuth() {
   const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
-  const auth = new google.auth.GoogleAuth({
+  return new google.auth.GoogleAuth({
     credentials: creds,
     scopes: ['https://www.googleapis.com/auth/spreadsheets']
   });
-  return auth;
 }
 
 async function ensureSheet(sheets, spreadsheetId, sheetName) {
   const meta = await sheets.spreadsheets.get({ spreadsheetId });
-
   const existing = meta.data.sheets.map(s => s.properties.title);
   if (!existing.includes(sheetName)) {
     await sheets.spreadsheets.batchUpdate({
@@ -43,6 +42,21 @@ async function ensureSheet(sheets, spreadsheetId, sheetName) {
         requests: [{ addSheet: { properties: { title: sheetName } } }]
       }
     });
+  }
+}
+
+async function getAcademyListStats(token) {
+  try {
+    const resp = await fetch(`https://api.cc.email/v3/contact_lists/${ACADEMY_LIST_ID}?include_count=true`, {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    const data = await resp.json();
+    const total = data.membership_count || 0;
+    const unsub = data.unsubscribe_count || 0;
+    return { total, unsub, active: total - unsub };
+  } catch(e) {
+    console.error('Failed to get academy list stats:', e.message);
+    return { total: 0, unsub: 0, active: 0 };
   }
 }
 
@@ -70,20 +84,42 @@ async function writeToMembershipSheet(membershipData) {
   }
 }
 
-async function writeToAcademySheet(syncedCount) {
+async function writeToAcademySheet(syncedCount, token) {
   if (!ACADEMY_SHEET_ID) return;
   try {
     const auth = await getGoogleAuth().getClient();
     const sheets = google.sheets({ version: 'v4', auth });
     await ensureSheet(sheets, ACADEMY_SHEET_ID, 'Sync Log');
+
+    const stats = await getAcademyListStats(token);
     const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
-    await sheets.spreadsheets.values.update({
+
+    // Check if header row exists
+    const existing = await sheets.spreadsheets.values.get({
+      spreadsheetId: ACADEMY_SHEET_ID,
+      range: "'Sync Log'!A1"
+    });
+
+    if (!existing.data.values || existing.data.values[0][0] !== 'Last Synced') {
+      // Write header first
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: ACADEMY_SHEET_ID,
+        range: "'Sync Log'!A1",
+        valueInputOption: 'RAW',
+        requestBody: { values: [['Last Synced', 'Total on List', 'Unsubscribes', 'Active Emails', 'New This Sync']] }
+      });
+    }
+
+    // Append new row
+    await sheets.spreadsheets.values.append({
       spreadsheetId: ACADEMY_SHEET_ID,
       range: "'Sync Log'!A1",
       valueInputOption: 'RAW',
-      requestBody: { values: [['Last Synced', 'New Contacts Added'], [now, syncedCount]] }
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[now, stats.total, stats.unsub, stats.active, syncedCount]] }
     });
-    console.log(`Academy sheet updated: last synced ${now}, ${syncedCount} new contacts`);
+
+    console.log(`Academy sheet updated: ${now}, total=${stats.total}, unsub=${stats.unsub}, active=${stats.active}, new=${syncedCount}`);
   } catch(e) {
     console.error('Academy sheet write error:', e.message);
   }
@@ -207,7 +243,8 @@ app.post('/sync-membership-sheet', async (req, res) => {
 app.post('/sync-academy-sheet', async (req, res) => {
   try {
     const { syncedCount } = req.body;
-    await writeToAcademySheet(syncedCount);
+    const token = await getValidToken();
+    await writeToAcademySheet(syncedCount, token);
     res.json({ success: true });
   } catch(e) {
     res.status(500).json({ error: e.message });
