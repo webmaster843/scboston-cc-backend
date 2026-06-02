@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SCBoston CC Sync Tool</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;font-size:14px;color:#1a1a1a;background:#f5f5f3;min-height:100vh;padding:1.5rem}
+.app{max-width:740px;margin:0 auto}
+h1{font-size:18px;font-weight:500;margin-bottom:4px}
+.subtitle{font-size:13px;color:#666;margin-bottom:1.5rem}
+.tabs{display:flex;border-bottom:1px solid #e5e5e0;margin-bottom:1.5rem}
+.tab{padding:9px 18px;cursor:pointer;font-size:13px;color:#888;border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .15s;display:flex;align-items:center;gap:6px}
+.tab.active{color:#1a1a1a;border-bottom-color:#1a1a1a;font-weight:500}
+.tab:hover:not(.active){color:#1a1a1a}
+.panel{display:none}.panel.active{display:block}
+.card{background:#fff;border:0.5px solid #e5e5e0;border-radius:12px;padding:1.25rem;margin-bottom:1rem}
+.section-title{font-size:12px;font-weight:500;color:#888;letter-spacing:.05em;text-transform:uppercase;margin-bottom:12px}
+label{display:block;font-size:12px;color:#666;margin-bottom:4px;font-weight:500}
+input[type=text],input[type=password],textarea,select{width:100%;font-family:system-ui,sans-serif;font-size:13px;padding:8px 10px;border:0.5px solid #ccc;border-radius:8px;background:#fff;color:#1a1a1a;margin-bottom:10px;outline:none}
+input[type=text]:focus,input[type=password]:focus,textarea:focus{border-color:#888}
+textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;line-height:1.5}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border:0.5px solid #ccc;border-radius:8px;background:transparent;color:#1a1a1a;font-family:system-ui,sans-serif;font-size:13px;cursor:pointer;transition:background .15s}
+.btn:hover{background:#f0f0ee}
+.btn:active{transform:scale(.98)}
+.btn-primary{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
+.btn-primary:hover{background:#333}
+.btn-sm{padding:6px 11px;font-size:12px}
+.btn-group{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:1rem}
+.status{border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:1rem;display:none}
+.status.show{display:flex;align-items:flex-start;gap:8px}
+.status.info{background:#e8f4ff;color:#1a5fa0}
+.status.success{background:#e6f4ea;color:#1a6e35}
+.status.error{background:#fce8e8;color:#9e2020}
+.status.warning{background:#fff8e1;color:#8a6200}
+.log{font-family:monospace;font-size:11px;background:#f8f8f6;border:0.5px solid #e5e5e0;border-radius:8px;padding:10px;max-height:220px;overflow-y:auto;display:none;margin-top:8px;line-height:1.8}
+.log.show{display:block}
+.log .ok{color:#1a6e35}.log .err{color:#9e2020}.log .warn{color:#8a6200}.log .dim{color:#999}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:1rem}
+.metric{background:#f8f8f6;border-radius:8px;padding:12px 14px}
+.metric .val{font-size:22px;font-weight:500;line-height:1.2;color:#1a1a1a}
+.metric .lbl{font-size:11px;color:#888;margin-top:2px}
+.backend-status{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;border-radius:6px;font-weight:500;margin-bottom:12px}
+.backend-ok{background:#e6f4ea;color:#1a6e35}
+.backend-err{background:#fce8e8;color:#9e2020}
+.backend-checking{background:#f0f0ee;color:#666}
+.hint{font-size:11px;color:#999;margin-top:-6px;margin-bottom:10px;line-height:1.5}
+.list-id-row{display:grid;grid-template-columns:180px 1fr;gap:8px;align-items:center;margin-bottom:6px}
+.list-id-row span{font-size:12px;color:#666}
+.list-id-row input{margin-bottom:0}
+.breakdown-row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:0.5px solid #f0f0ee;font-size:12px}
+.breakdown-row:last-child{border-bottom:none}
+.saved-badge{font-size:11px;color:#1a6e35;margin-left:8px;display:none}
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>SCBoston &amp; Skating Academy — CC sync</h1>
+  <p class="subtitle">Process membership and academy exports, then sync directly to Constant Contact.</p>
+
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('settings')"><i class="ti ti-settings" style="font-size:15px"></i> Settings</div>
+    <div class="tab" onclick="switchTab('membership')"><i class="ti ti-users" style="font-size:15px"></i> Membership sync</div>
+    <div class="tab" onclick="switchTab('academy')"><i class="ti ti-star" style="font-size:15px"></i> Academy sync</div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div class="panel active" id="panel-settings">
+
+    <div class="card">
+      <div class="section-title">Backend connection</div>
+      <div id="backend-status" class="backend-status backend-checking"><i class="ti ti-refresh" style="font-size:13px"></i> Checking...</div>
+      <div style="font-size:12px;color:#666;margin-bottom:10px">
+        Your Render backend handles Constant Contact authentication automatically. No token pasting needed.
+      </div>
+      <button class="btn btn-sm" onclick="checkBackend()"><i class="ti ti-refresh" style="font-size:13px"></i> Check connection</button>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Membership list IDs</div>
+      <div style="font-size:12px;color:#666;margin-bottom:10px">Pre-filled from your existing setup. Update if any change.</div>
+      <div id="list-ids-grid"></div>
+      <button class="btn btn-sm" onclick="saveListIds()"><i class="ti ti-device-floppy" style="font-size:13px"></i> Save list IDs</button>
+      <span class="saved-badge" id="listids-saved"><i class="ti ti-check"></i> Saved</span>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Academy list ID</div>
+      <input type="text" id="acad-list-id" value="132ca7fe-47cb-11f1-bdf1-02420a320003">
+      <button class="btn btn-sm" onclick="saveAcadId()"><i class="ti ti-device-floppy" style="font-size:13px"></i> Save</button>
+      <span class="saved-badge" id="acadid-saved"><i class="ti ti-check"></i> Saved</span>
+    </div>
+
+  </div>
+
+  <!-- MEMBERSHIP SYNC -->
+  <div class="panel" id="panel-membership">
+    <div id="mem-status" class="status"></div>
+
+    <div class="card">
+      <div class="section-title">Step 1 — ActiveNet export</div>
+      <div class="hint" style="margin-bottom:8px">Copy all data from your ActiveNet Excel export and paste below (include the header row).</div>
+      <textarea id="mem-raw" placeholder="Paste ActiveNet export here (tab-separated from Excel)..."></textarea>
+      <button class="btn btn-sm" onclick="parseMemRaw()"><i class="ti ti-table-import" style="font-size:13px"></i> Parse data</button>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Step 2 — Unsubscribe list (optional)</div>
+      <div class="hint" style="margin-bottom:8px">Export from CC → Contacts → Unsubscribed. These addresses will never be re-added.</div>
+      <textarea id="mem-unsub" placeholder="Paste CC unsubscribe export here (optional)..." style="min-height:80px"></textarea>
+    </div>
+
+    <div id="mem-preview" style="display:none;margin-bottom:1rem">
+      <div class="metrics" id="mem-metrics"></div>
+      <div class="card">
+        <div class="section-title">Breakdown by membership type</div>
+        <div id="mem-breakdown"></div>
+      </div>
+    </div>
+
+    <div class="btn-group">
+      <button class="btn btn-primary" onclick="runMembershipSync()"><i class="ti ti-refresh" style="font-size:13px"></i> Sync to Constant Contact</button>
+      <button class="btn" onclick="exportMembershipCSV()"><i class="ti ti-download" style="font-size:13px"></i> Download CSVs</button>
+    </div>
+    <div class="log" id="mem-log"></div>
+  </div>
+
+  <!-- ACADEMY SYNC -->
+  <div class="panel" id="panel-academy">
+    <div id="acad-status" class="status"></div>
+
+    <div class="card">
+      <div class="section-title">Step 1 — Household export</div>
+      <div class="hint" style="margin-bottom:8px">Must include columns named <code>P1 Email</code> and/or <code>P2 Email</code>.</div>
+      <textarea id="acad-raw" placeholder="Paste household export here..."></textarea>
+      <button class="btn btn-sm" onclick="parseAcadRaw()"><i class="ti ti-table-import" style="font-size:13px"></i> Parse data</button>
+    </div>
+
+    <div id="acad-preview" style="display:none;margin-bottom:1rem">
+      <div class="metrics" id="acad-metrics"></div>
+    </div>
+
+    <div class="btn-group">
+      <button class="btn btn-primary" onclick="runAcademySync()"><i class="ti ti-refresh" style="font-size:13px"></i> Sync to Constant Contact</button>
+      <button class="btn" onclick="exportAcademyCSV()"><i class="ti ti-download" style="font-size:13px"></i> Download email list</button>
+    </div>
+    <div class="log" id="acad-log"></div>
+  </div>
+
+</div>
+
+<script>
+const BACKEND = '';
+const TYPES = ["Family","Single","U.S./World Championships Competitor","Introductory","Team","Friends of the Club","Official","Coaches","Honorary","Club Management","Skating Academy Management"];
+const DEFAULT_IDS = {
+  "Family":"25012be6-372f-11f1-a972-02420a320002",
+  "Single":"0dd014c2-3730-11f1-a972-02420a320002",
+  "U.S./World Championships Competitor":"c64c1a18-3731-11f1-9cf9-02420a320002",
+  "Introductory":"fc9423da-3732-11f1-b8ee-02420a320002",
+  "Team":"a5c58e62-3733-11f1-8aff-02420a320002",
+  "Friends of the Club":"4eee0276-3734-11f1-b6ab-02420a320002",
+  "Official":"f0539a5e-3734-11f1-b6ab-02420a320002",
+  "Coaches":"89e23c8e-3735-11f1-9d8e-02420a320002",
+  "Honorary":"afdd7dec-55cf-11f0-8460-fa163ef29647",
+  "Club Management":"e9ceaf0a-3736-11f1-b5b9-02420a320002",
+  "Skating Academy Management":"6e00b896-3736-11f1-8aff-02420a320002"
+};
+
+let S = {
+  listIds: {...DEFAULT_IDS},
+  acadListId: '',
+  memData: {},
+  unsubSet: new Set(),
+  acadEmails: [],
+  acadSynced: new Set()
+};
+
+async function getToken() {
+  const resp = await fetch(BACKEND + '/token');
+  const data = await resp.json();
+  return data.access_token;
+}
+
+async function checkBackend() {
+  const el = document.getElementById('backend-status');
+  el.className = 'backend-status backend-checking';
+  el.innerHTML = '<i class="ti ti-refresh" style="font-size:13px"></i> Checking...';
+  try {
+    const resp = await fetch(BACKEND + '/token');
+    const data = await resp.json();
+    if (data.access_token) {
+      el.className = 'backend-status backend-ok';
+      el.innerHTML = '<i class="ti ti-circle-check" style="font-size:13px"></i> Connected to Constant Contact';
+    } else {
+      throw new Error('No token');
+    }
+  } catch(e) {
+    el.className = 'backend-status backend-err';
+    el.innerHTML = '<i class="ti ti-alert-circle" style="font-size:13px"></i> Backend not reachable — may be waking up, try again in 30 seconds';
+  }
+}
+
+function switchTab(t) {
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(el => el.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+  document.getElementById('panel-' + t).classList.add('active');
+}
+
+function showStatus(id, msg, type) {
+  const el = document.getElementById(id);
+  const icons = {info:'ti-info-circle', success:'ti-circle-check', error:'ti-alert-circle', warning:'ti-alert-triangle'};
+  el.innerHTML = `<i class="ti ${icons[type]}" style="font-size:15px;flex-shrink:0;margin-top:1px"></i><span>${msg}</span>`;
+  el.className = 'status show ' + type;
+}
+
+function log(id, msg, cls='dim') {
+  const el = document.getElementById(id);
+  el.classList.add('show');
+  el.innerHTML += `<div class="${cls}">${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function saveListIds() {
+  TYPES.forEach(t => {
+    const el = document.getElementById('lid_' + t.replace(/\W+/g,'_'));
+    if (el) S.listIds[t] = el.value.trim();
+  });
+  document.getElementById('listids-saved').style.display = 'inline';
+}
+
+function saveAcadId() {
+  S.acadListId = document.getElementById('acad-list-id').value.trim();
+  document.getElementById('acadid-saved').style.display = 'inline';
+}
+
+function buildListIdsGrid() {
+  document.getElementById('list-ids-grid').innerHTML = TYPES.map(t =>
+    `<div class="list-id-row">
+      <span>${t}</span>
+      <input type="text" id="lid_${t.replace(/\W+/g,'_')}" value="${DEFAULT_IDS[t]||''}" placeholder="List ID">
+    </div>`
+  ).join('');
+}
+
+function parseRows(text) {
+  const lines = text.trim().split('\n').filter(l => l.trim());
+  if (!lines.length) return [];
+  const delim = lines[0].includes('\t') ? '\t' : ',';
+  return lines.map(l => l.split(delim).map(c => c.replace(/^"|"$/g,'').trim()));
+}
+
+function validEmail(e) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e); }
+
+function parseMemRaw() {
+  const raw = document.getElementById('mem-raw').value;
+  const unsub = document.getElementById('mem-unsub').value;
+  if (!raw.trim()) { showStatus('mem-status','Paste your ActiveNet export first.','warning'); return; }
+
+  const rows = parseRows(raw);
+  if (rows.length < 2) { showStatus('mem-status','Not enough data found. Check your paste.','error'); return; }
+  const headers = rows[0].map(h => h.toLowerCase());
+
+  const emailCol = headers.findIndex(h => h.includes('email'));
+  const nameCol  = headers.findIndex(h => h.includes('customer') || h.includes('name'));
+  const pkgCol   = headers.findIndex(h => h.includes('package'));
+
+  if (emailCol === -1) { showStatus('mem-status','No email column found. Check headers include "email".','error'); return; }
+
+  S.unsubSet = new Set();
+  if (unsub.trim()) {
+    const urows = parseRows(unsub);
+    const uh = urows[0].map(h => h.toLowerCase());
+    const uec = uh.findIndex(h => h.includes('email'));
+    if (uec !== -1) urows.slice(1).forEach(r => { if (r[uec]) S.unsubSet.add(r[uec].toLowerCase().trim()); });
+  }
+
+  const byType = {};
+  const seen = new Set();
+  let skipped = 0;
+
+  rows.slice(1).forEach(r => {
+    const email = (r[emailCol] || '').trim().toLowerCase();
+    const rawPkg = pkgCol !== -1 ? (r[pkgCol] || 'Unknown') : 'Unknown';
+    const pkg = rawPkg.replace(/\(p\)/gi,'').trim();
+    if (!validEmail(email)) { skipped++; return; }
+    if (S.unsubSet.has(email)) { skipped++; return; }
+    if (seen.has(email)) return;
+    seen.add(email);
+    const nameParts = nameCol !== -1 ? (r[nameCol] || '').split(',').map(s => s.trim()) : ['',''];
+    if (!byType[pkg]) byType[pkg] = [];
+    byType[pkg].push({ email, firstName: nameParts[1]||'', lastName: nameParts[0]||'', pkg });
+  });
+
+  S.memData = byType;
+  const total = Object.values(byType).reduce((s,a) => s+a.length, 0);
+  const types = Object.keys(byType).length;
+
+  document.getElementById('mem-metrics').innerHTML = `
+    <div class="metric"><div class="val">${total}</div><div class="lbl">Valid contacts</div></div>
+    <div class="metric"><div class="val">${types}</div><div class="lbl">Membership types</div></div>
+    <div class="metric"><div class="val">${S.unsubSet.size}</div><div class="lbl">Unsubscribes blocked</div></div>
+    <div class="metric"><div class="val">${skipped}</div><div class="lbl">Rows skipped</div></div>`;
+
+  document.getElementById('mem-breakdown').innerHTML = Object.entries(byType)
+    .sort((a,b) => b[1].length - a[1].length)
+    .map(([t,arr]) => `<div class="breakdown-row"><span>${t}</span><span style="font-weight:500">${arr.length}</span></div>`)
+    .join('');
+
+  document.getElementById('mem-preview').style.display = 'block';
+  showStatus('mem-status', `Parsed ${total} contacts across ${types} membership types. Ready to sync.`, 'success');
+}
+
+function parseAcadRaw() {
+  const raw = document.getElementById('acad-raw').value;
+  if (!raw.trim()) { showStatus('acad-status','Paste your household export first.','warning'); return; }
+
+  const rows = parseRows(raw);
+  const headers = rows[0].map(h => h.trim());
+  const p1 = headers.findIndex(h => h.toLowerCase() === 'p1 email');
+  const p2 = headers.findIndex(h => h.toLowerCase() === 'p2 email');
+
+  if (p1 === -1 && p2 === -1) {
+    showStatus('acad-status','Could not find "P1 Email" or "P2 Email" columns. Check your header row.','error');
+    return;
+  }
+
+  const all = new Set();
+  rows.slice(1).forEach(r => {
+    if (p1 !== -1) { const e=(r[p1]||'').trim().toLowerCase(); if(validEmail(e)) all.add(e); }
+    if (p2 !== -1) { const e=(r[p2]||'').trim().toLowerCase(); if(validEmail(e)) all.add(e); }
+  });
+
+  S.acadEmails = [...all];
+  const newCount = S.acadEmails.filter(e => !S.acadSynced.has(e)).length;
+
+  document.getElementById('acad-metrics').innerHTML = `
+    <div class="metric"><div class="val">${S.acadEmails.length}</div><div class="lbl">Unique emails</div></div>
+    <div class="metric"><div class="val">${S.acadSynced.size}</div><div class="lbl">Already synced</div></div>
+    <div class="metric"><div class="val">${newCount}</div><div class="lbl">New to push</div></div>`;
+
+  document.getElementById('acad-preview').style.display = 'block';
+  showStatus('acad-status', `Found ${S.acadEmails.length} unique emails. ${newCount} are new this session.`, 'success');
+}
+
+async function ccImport(listId, contacts, logId) {
+  if (!listId) { log(logId,'No list ID configured for this list.','err'); return 0; }
+  let token;
+  try {
+    token = await getToken();
+  } catch(e) {
+    log(logId, 'Could not reach backend to get token. It may be waking up — wait 30 seconds and try again.', 'err');
+    return 0;
+  }
+
+  const BATCH = 500;
+  let pushed = 0;
+  for (let i = 0; i < contacts.length; i += BATCH) {
+    const batch = contacts.slice(i, i + BATCH);
+    const bNum = Math.floor(i/BATCH) + 1;
+    log(logId, `Sending batch ${bNum} (${batch.length} contacts)...`);
+    try {
+      const resp = await fetch(BACKEND + '/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contacts: batch.map(c => ({
+            email_address: { address: c.email, permission_to_send: 'implicit' },
+            first_name: c.firstName || '',
+            last_name:  c.lastName  || '',
+            list_memberships: [listId]
+          })),
+          list_id: listId
+        })
+      });
+      if (resp.status === 200 || resp.status === 201 || resp.status === 202) {
+        pushed += batch.length;
+        log(logId, `Batch ${bNum} accepted — ${batch.length} contacts queued.`, 'ok');
+      } else {
+        const body = await resp.json().catch(() => ({}));
+        log(logId, `Batch ${bNum} failed: HTTP ${resp.status} — ${JSON.stringify(body).substring(0,200)}`, 'err');
+      }
+    } catch(e) {
+      log(logId, `Batch ${bNum} error: ${e.message}`, 'err');
+    }
+  }
+  return pushed;
+}
+
+async function runMembershipSync() {
+  if (!Object.keys(S.memData).length) { showStatus('mem-status','Parse your data first.','warning'); return; }
+  const logEl = document.getElementById('mem-log');
+  logEl.innerHTML = ''; logEl.classList.add('show');
+  showStatus('mem-status','Syncing to Constant Contact...','info');
+
+  let totalPushed = 0;
+  let skippedTypes = 0;
+
+  for (const [type, contacts] of Object.entries(S.memData)) {
+    const lid = S.listIds[type];
+    if (!lid) { log('mem-log', `No list ID for "${type}" — skipping.`, 'warn'); skippedTypes++; continue; }
+    log('mem-log', `── ${type} (${contacts.length} contacts)`);
+    const pushed = await ccImport(lid, contacts, 'mem-log');
+    totalPushed += pushed;
+  }
+
+  if (totalPushed > 0) {
+    showStatus('mem-status', `Sync complete. ${totalPushed} contacts pushed to Constant Contact.${skippedTypes ? ' ' + skippedTypes + ' types skipped (no list ID).':''}`, 'success');
+  } else {
+    showStatus('mem-status', 'No contacts were pushed. Check the log below for details.', 'error');
+  }
+}
+
+async function runAcademySync() {
+  if (!S.acadEmails.length) { showStatus('acad-status','Parse your data first.','warning'); return; }
+  const listId = S.acadListId || document.getElementById('acad-list-id').value.trim();
+  if (!listId) { showStatus('acad-status','No Academy list ID set. Add it in the Settings tab.','error'); return; }
+
+  const logEl = document.getElementById('acad-log');
+  logEl.innerHTML = ''; logEl.classList.add('show');
+
+  const newEmails = S.acadEmails.filter(e => !S.acadSynced.has(e));
+  if (!newEmails.length) { showStatus('acad-status','All emails already synced this session. Nothing new to push.','warning'); return; }
+
+  showStatus('acad-status', `Syncing ${newEmails.length} new emails...`, 'info');
+  const contacts = newEmails.map(e => ({ email: e, firstName:'', lastName:'' }));
+  const pushed = await ccImport(listId, contacts, 'acad-log');
+
+  if (pushed > 0) {
+    newEmails.forEach(e => S.acadSynced.add(e));
+    showStatus('acad-status', `Sync complete. ${pushed} new emails pushed. ${S.acadSynced.size} total synced this session.`, 'success');
+  } else {
+    showStatus('acad-status', 'No emails were pushed. Check the log below for details.', 'error');
+  }
+}
+
+function exportMembershipCSV() {
+  if (!Object.keys(S.memData).length) { showStatus('mem-status','Parse data first.','warning'); return; }
+  Object.entries(S.memData).forEach(([type, contacts]) => {
+    const csv = 'First Name,Last Name,Email\n' + contacts.map(c => `${c.firstName},${c.lastName},${c.email}`).join('\n');
+    const a = document.createElement('a');
+    a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+    a.download = type.replace(/[^a-z0-9]/gi,'_') + '.csv';
+    a.click();
+  });
+}
+
+function exportAcademyCSV() {
+  if (!S.acadEmails.length) { showStatus('acad-status','Parse data first.','warning'); return; }
+  const csv = 'Email\n' + S.acadEmails.join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'skating_academy_emails.csv';
+  a.click();
+}
+
+buildListIdsGrid();
+S.acadListId = '132ca7fe-47cb-11f1-bdf1-02420a320003';
+checkBackend();
+</script>
+</body>
+</html>
