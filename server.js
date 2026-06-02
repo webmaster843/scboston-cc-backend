@@ -86,7 +86,7 @@ app.post('/import', async (req, res) => {
         'Authorization': 'Bearer ' + token,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ contacts, list_id })
+      body: JSON.stringify({ contacts, list_ids: [list_id] })
     });
     const data = await resp.json();
     console.log('CC response:', resp.status, JSON.stringify(data).substring(0, 200));
