@@ -84,17 +84,16 @@ async function writeToMembershipSheet(membershipData) {
   }
 }
 
-async function writeToAcademySheet(syncedCount, token) {
+async function writeToAcademySheet(statsBefore, statsAfter) {
   if (!ACADEMY_SHEET_ID) return;
   try {
     const auth = await getGoogleAuth().getClient();
     const sheets = google.sheets({ version: 'v4', auth });
     await ensureSheet(sheets, ACADEMY_SHEET_ID, 'Sync Log');
 
-    const stats = await getAcademyListStats(token);
     const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+    const trueNew = statsAfter.active - statsBefore.active;
 
-    // Always ensure header is in row 1
     await sheets.spreadsheets.values.update({
       spreadsheetId: ACADEMY_SHEET_ID,
       range: "'Sync Log'!A1",
@@ -102,16 +101,15 @@ async function writeToAcademySheet(syncedCount, token) {
       requestBody: { values: [['Last Synced', 'Total on List', 'Unsubscribes', 'Active Emails', 'New This Sync']] }
     });
 
-    // Append new data row
     await sheets.spreadsheets.values.append({
       spreadsheetId: ACADEMY_SHEET_ID,
       range: "'Sync Log'!A1",
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: [[now, stats.total, stats.unsub, stats.active, syncedCount]] }
+      requestBody: { values: [[now, statsAfter.total, statsAfter.unsub, statsAfter.active, trueNew]] }
     });
 
-    console.log(`Academy sheet updated: ${now}, total=${stats.total}, unsub=${stats.unsub}, active=${stats.active}, new=${syncedCount}`);
+    console.log(`Academy sheet updated: ${now}, total=${statsAfter.total}, unsub=${statsAfter.unsub}, active=${statsAfter.active}, new=${trueNew}`);
   } catch(e) {
     console.error('Academy sheet write error:', e.message);
   }
@@ -197,6 +195,9 @@ app.post('/import', async (req, res) => {
     const token = await getValidToken();
     const { contacts, list_id } = req.body;
     console.log('Import - list_id:', list_id, '| contacts:', contacts.length);
+
+    const statsBefore = await getAcademyListStats(token);
+
     const payload = {
       import_data: contacts.map(c => ({
         email: c.email_address.address,
@@ -215,7 +216,7 @@ app.post('/import', async (req, res) => {
     });
     const data = await resp.json();
     console.log('CC response:', resp.status, JSON.stringify(data).substring(0, 200));
-    res.status(resp.status).json(data);
+    res.status(resp.status).json({ ...data, statsBefore });
   } catch(e) {
     console.error('Import error:', e.message);
     res.status(500).json({ error: e.message });
@@ -234,10 +235,15 @@ app.post('/sync-membership-sheet', async (req, res) => {
 
 app.post('/sync-academy-sheet', async (req, res) => {
   try {
-    const { syncedCount } = req.body;
+    const { statsBefore } = req.body;
     const token = await getValidToken();
-    await writeToAcademySheet(syncedCount, token);
-    res.json({ success: true });
+
+    // Wait a few seconds for CC to process the import
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    const statsAfter = await getAcademyListStats(token);
+    await writeToAcademySheet(statsBefore, statsAfter);
+    res.json({ success: true, statsBefore, statsAfter, trueNew: statsAfter.active - statsBefore.active });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
