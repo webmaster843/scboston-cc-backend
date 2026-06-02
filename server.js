@@ -94,23 +94,15 @@ async function writeToAcademySheet(syncedCount, token) {
     const stats = await getAcademyListStats(token);
     const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
 
-    // Check if header row exists
-    const existing = await sheets.spreadsheets.values.get({
+    // Always ensure header is in row 1
+    await sheets.spreadsheets.values.update({
       spreadsheetId: ACADEMY_SHEET_ID,
-      range: "'Sync Log'!A1"
+      range: "'Sync Log'!A1",
+      valueInputOption: 'RAW',
+      requestBody: { values: [['Last Synced', 'Total on List', 'Unsubscribes', 'Active Emails', 'New This Sync']] }
     });
 
-    if (!existing.data.values || existing.data.values[0][0] !== 'Last Synced') {
-      // Write header first
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: ACADEMY_SHEET_ID,
-        range: "'Sync Log'!A1",
-        valueInputOption: 'RAW',
-        requestBody: { values: [['Last Synced', 'Total on List', 'Unsubscribes', 'Active Emails', 'New This Sync']] }
-      });
-    }
-
-    // Append new row
+    // Append new data row
     await sheets.spreadsheets.values.append({
       spreadsheetId: ACADEMY_SHEET_ID,
       range: "'Sync Log'!A1",
