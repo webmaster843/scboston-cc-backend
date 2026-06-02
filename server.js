@@ -11,12 +11,38 @@ app.use(express.static(path.join(__dirname, 'public')));
 const CC_API_KEY = process.env.CC_API_KEY;
 const CC_CLIENT_SECRET = process.env.CC_CLIENT_SECRET;
 const REDIRECT_URI = process.env.REDIRECT_URI;
+const RENDER_API_KEY = process.env.RENDER_API_KEY;
+const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID;
 
 let storedTokens = {
   access_token: '',
-  refresh_token: '',
+  refresh_token: process.env.SAVED_REFRESH_TOKEN || '',
   expires_at: 0
 };
+
+async function saveRefreshToken(token) {
+  if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
+  try {
+    await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': 'Bearer ' + RENDER_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify([
+        { key: 'SAVED_REFRESH_TOKEN', value: token },
+        { key: 'CC_API_KEY', value: CC_API_KEY },
+        { key: 'CC_CLIENT_SECRET', value: CC_CLIENT_SECRET },
+        { key: 'REDIRECT_URI', value: REDIRECT_URI },
+        { key: 'RENDER_API_KEY', value: RENDER_API_KEY },
+        { key: 'RENDER_SERVICE_ID', value: RENDER_SERVICE_ID }
+      ])
+    });
+    console.log('Refresh token saved to Render environment');
+  } catch(e) {
+    console.error('Failed to save refresh token:', e.message);
+  }
+}
 
 async function refreshAccessToken() {
   if (!storedTokens.refresh_token) {
@@ -39,6 +65,7 @@ async function refreshAccessToken() {
     storedTokens.refresh_token = data.refresh_token || storedTokens.refresh_token;
     storedTokens.expires_at = Date.now() + (data.expires_in * 1000) - 60000;
     console.log('Token refreshed successfully, expires in', data.expires_in, 'seconds');
+    await saveRefreshToken(storedTokens.refresh_token);
   } else {
     throw new Error('Token refresh failed: ' + JSON.stringify(data));
   }
@@ -127,6 +154,7 @@ app.get('/callback', async (req, res) => {
       storedTokens.refresh_token = data.refresh_token;
       storedTokens.expires_at = Date.now() + (data.expires_in * 1000) - 60000;
       console.log('Authorization successful. Token expires in', data.expires_in, 'seconds');
+      await saveRefreshToken(data.refresh_token);
       res.send('<h2>Authorization successful!</h2><p>You can close this tab. The backend is now connected to Constant Contact.</p>');
     } else {
       console.error('Auth failed:', JSON.stringify(data));
