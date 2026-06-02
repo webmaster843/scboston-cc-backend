@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
 const path = require('path');
+const { google } = require('googleapis');
 
 const app = express();
 app.use(cors());
@@ -13,6 +14,8 @@ const CC_CLIENT_SECRET = process.env.CC_CLIENT_SECRET;
 const REDIRECT_URI = process.env.REDIRECT_URI;
 const RENDER_API_KEY = process.env.RENDER_API_KEY;
 const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID;
+const MEMBERSHIP_SHEET_ID = process.env.MEMBERSHIP_SHEET_ID;
+const ACADEMY_SHEET_ID = process.env.ACADEMY_SHEET_ID;
 
 let storedTokens = {
   access_token: '',
@@ -20,23 +23,82 @@ let storedTokens = {
   expires_at: 0
 };
 
+function getGoogleAuth() {
+  const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+  const auth = new google.auth.GoogleAuth({
+    credentials: creds,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  });
+  return auth;
+}
+
+async function ensureSheet(sheets, spreadsheetId, sheetName) {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId });
+
+  const existing = meta.data.sheets.map(s => s.properties.title);
+  if (!existing.includes(sheetName)) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: sheetName } } }]
+      }
+    });
+  }
+}
+
+async function writeToMembershipSheet(membershipData) {
+  if (!MEMBERSHIP_SHEET_ID) return;
+  try {
+    const auth = await getGoogleAuth().getClient();
+    const sheets = google.sheets({ version: 'v4', auth });
+    for (const [type, contacts] of Object.entries(membershipData)) {
+      await ensureSheet(sheets, MEMBERSHIP_SHEET_ID, type);
+      const rows = [
+        ['First Name', 'Last Name', 'Email'],
+        ...contacts.map(c => [c.firstName || '', c.lastName || '', c.email])
+      ];
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MEMBERSHIP_SHEET_ID,
+        range: `'${type}'!A1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: rows }
+      });
+      console.log(`Membership sheet updated: ${type} (${contacts.length} rows)`);
+    }
+  } catch(e) {
+    console.error('Membership sheet write error:', e.message);
+  }
+}
+
+async function writeToAcademySheet(syncedCount) {
+  if (!ACADEMY_SHEET_ID) return;
+  try {
+    const auth = await getGoogleAuth().getClient();
+    const sheets = google.sheets({ version: 'v4', auth });
+    await ensureSheet(sheets, ACADEMY_SHEET_ID, 'Sync Log');
+    const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: ACADEMY_SHEET_ID,
+      range: "'Sync Log'!A1",
+      valueInputOption: 'RAW',
+      requestBody: { values: [['Last Synced', 'New Contacts Added'], [now, syncedCount]] }
+    });
+    console.log(`Academy sheet updated: last synced ${now}, ${syncedCount} new contacts`);
+  } catch(e) {
+    console.error('Academy sheet write error:', e.message);
+  }
+}
+
 async function saveRefreshToken(token) {
   if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
   try {
-    await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+    await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars/SAVED_REFRESH_TOKEN`, {
       method: 'PUT',
       headers: {
         'Authorization': 'Bearer ' + RENDER_API_KEY,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify([
-        { key: 'SAVED_REFRESH_TOKEN', value: token },
-        { key: 'CC_API_KEY', value: CC_API_KEY },
-        { key: 'CC_CLIENT_SECRET', value: CC_CLIENT_SECRET },
-        { key: 'REDIRECT_URI', value: REDIRECT_URI },
-        { key: 'RENDER_API_KEY', value: RENDER_API_KEY },
-        { key: 'RENDER_SERVICE_ID', value: RENDER_SERVICE_ID }
-      ])
+      body: JSON.stringify({ value: token })
     });
     console.log('Refresh token saved to Render environment');
   } catch(e) {
@@ -128,6 +190,26 @@ app.post('/import', async (req, res) => {
     res.status(resp.status).json(data);
   } catch(e) {
     console.error('Import error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/sync-membership-sheet', async (req, res) => {
+  try {
+    const { membershipData } = req.body;
+    await writeToMembershipSheet(membershipData);
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/sync-academy-sheet', async (req, res) => {
+  try {
+    const { syncedCount } = req.body;
+    await writeToAcademySheet(syncedCount);
+    res.json({ success: true });
+  } catch(e) {
     res.status(500).json({ error: e.message });
   }
 });
