@@ -80,13 +80,21 @@ app.post('/import', async (req, res) => {
     const token = await getValidToken();
     const { contacts, list_id } = req.body;
     console.log('Import - list_id:', list_id, '| contacts:', contacts.length);
-    const resp = await fetch('https://api.cc.email/v3/activities/contact_imports', {
+    const payload = {
+      import_data: contacts.map(c => ({
+        email: c.email_address.address,
+        first_name: c.first_name || '',
+        last_name: c.last_name || ''
+      })),
+      list_ids: [list_id]
+    };
+    const resp = await fetch('https://api.cc.email/v3/activities/contacts_json_import', {
       method: 'POST',
       headers: {
         'Authorization': 'Bearer ' + token,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ contacts, list_ids: [list_id] })
+      body: JSON.stringify(payload)
     });
     const data = await resp.json();
     console.log('CC response:', resp.status, JSON.stringify(data).substring(0, 200));
