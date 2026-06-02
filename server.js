@@ -73,20 +73,28 @@ app.post('/import', async (req, res) => {
   try {
     const token = await getValidToken();
     const { contacts, list_id } = req.body;
+    console.log('Import request - list_id:', list_id);
+    console.log('Import request - contact count:', contacts.length);
+    console.log('Import request - first contact:', JSON.stringify(contacts[0]));
+    const payload = {
+      contacts: contacts,
+      list_id: list_id
+    };
+    console.log('Payload sample:', JSON.stringify(payload).substring(0, 300));
     const resp = await fetch('https://api.cc.email/v3/activities/contact_imports', {
       method: 'POST',
       headers: {
         'Authorization': 'Bearer ' + token,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        contacts: contacts,
-        list_id: list_id
-      })
+      body: JSON.stringify(payload)
     });
     const data = await resp.json();
+    console.log('CC response status:', resp.status);
+    console.log('CC response:', JSON.stringify(data));
     res.status(resp.status).json(data);
   } catch(e) {
+    console.error('Import error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
