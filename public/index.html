@@ -170,6 +170,7 @@ const DEFAULT_IDS = {
 };
 
 let S = {
+  lastStatsBefore: null,
   listIds: {...DEFAULT_IDS},
   acadListId: '',
   memData: {},
@@ -378,6 +379,8 @@ async function ccImport(listId, contacts, logId) {
       });
       if (resp.status === 200 || resp.status === 201 || resp.status === 202) {
         pushed += batch.length;
+        const respData = await resp.json().catch(() => ({}));
+        if (respData.statsBefore) S.lastStatsBefore = respData.statsBefore;
         log(logId, `Batch ${bNum} accepted — ${batch.length} contacts queued.`, 'ok');
       } else {
         const body = await resp.json().catch(() => ({}));
@@ -449,7 +452,7 @@ async function runAcademySync() {
       const sheetResp = await fetch(BACKEND + '/sync-academy-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ syncedCount: pushed })
+        body: JSON.stringify({ statsBefore: S.lastStatsBefore || null })
       });
       const sheetData = await sheetResp.json();
       if (sheetData.success) log('acad-log', 'Academy sheet updated.', 'ok');
