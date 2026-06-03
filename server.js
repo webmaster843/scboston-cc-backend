@@ -84,13 +84,113 @@ async function writeToMembershipSheet(membershipData) {
   }
 }
 
-async function writeToAcademySheet(statsBefore, statsAfter) {
-  if (!ACADEMY_SHEET_ID) return;
+async function fetchAllUnsubscribes(token) {
+  const emails = new Set();
+  let cursor = null;
+  let page = 0;
+  try {
+    do {
+      const url = cursor
+        ? `https://api.cc.email/v3/contacts?status=unsubscribed&limit=500&cursor=${cursor}`
+        : `https://api.cc.email/v3/contacts?status=unsubscribed&limit=500`;
+      const resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+      const data = await resp.json();
+      (data.contacts || []).forEach(c => {
+        const addr = c.email_address && c.email_address.address;
+        if (addr) emails.add(addr.toLowerCase().trim());
+      });
+      cursor = data._links && data._links.next
+        ? new URL('https://api.cc.email' + data._links.next.href).searchParams.get('cursor')
+        : null;
+      page++;
+    } while (cursor && page < 50); // safety cap at 25,000 contacts
+    console.log(`Fetched ${emails.size} unsubscribed emails from CC`);
+  } catch(e) {
+    console.error('Failed to fetch unsubscribes:', e.message);
+  }
+  return emails;
+}
+
+async function updateMasterList(sheets, emailsSynced, unsubSet) {
+  await ensureSheet(sheets, ACADEMY_SHEET_ID, 'MASTER_LIST');
+  const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York' });
+
+  // Read existing master list
+  const existing = await sheets.spreadsheets.values.get({
+    spreadsheetId: ACADEMY_SHEET_ID,
+    range: "'MASTER_LIST'!A:E"
+  });
+
+  const rows = existing.data.values || [];
+  const hasHeader = rows.length > 0 && rows[0][0] === 'Email';
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+
+  // Build map of existing records: email -> [email, firstSeen, lastSeen, status, unsubDate]
+  const masterMap = new Map();
+  dataRows.forEach(r => {
+    if (r[0]) masterMap.set(r[0].toLowerCase().trim(), [...r]);
+  });
+
+  // Update/add each synced email
+  emailsSynced.forEach(email => {
+    const key = email.toLowerCase().trim();
+    if (unsubSet.has(key)) {
+      // Mark as unsubscribed
+      if (masterMap.has(key)) {
+        const rec = masterMap.get(key);
+        rec[3] = 'unsubscribed';
+        if (!rec[4]) rec[4] = today; // set unsub date if not already set
+        masterMap.set(key, rec);
+      } else {
+        masterMap.set(key, [key, today, today, 'unsubscribed', today]);
+      }
+    } else {
+      if (masterMap.has(key)) {
+        const rec = masterMap.get(key);
+        rec[2] = today; // update last seen
+        if (rec[3] !== 'unsubscribed') rec[3] = 'active';
+        masterMap.set(key, rec);
+      } else {
+        masterMap.set(key, [key, today, today, 'active', '']);
+      }
+    }
+  });
+
+  // Also mark any emails in unsubSet that exist in master but weren't in this sync
+  masterMap.forEach((rec, key) => {
+    if (unsubSet.has(key) && rec[3] !== 'unsubscribed') {
+      rec[3] = 'unsubscribed';
+      if (!rec[4]) rec[4] = today;
+      masterMap.set(key, rec);
+    }
+  });
+
+  const outputRows = [
+    ['Email', 'First Seen', 'Last Seen', 'Status', 'Unsubscribed Date'],
+    ...Array.from(masterMap.values()).map(r => [r[0]||'', r[1]||'', r[2]||'', r[3]||'active', r[4]||''])
+  ];
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: ACADEMY_SHEET_ID,
+    range: "'MASTER_LIST'!A1",
+    valueInputOption: 'RAW',
+    requestBody: { values: outputRows }
+  });
+
+  const activeCount = outputRows.slice(1).filter(r => r[3] === 'active').length;
+  const unsubCount = outputRows.slice(1).filter(r => r[3] === 'unsubscribed').length;
+  console.log(`MASTER_LIST updated: ${activeCount} active, ${unsubCount} unsubscribed`);
+  return { total: masterMap.size, active: activeCount, unsub: unsubCount };
+}
+
+async function writeToAcademySheet(statsBefore, statsAfter, emailsSynced, unsubSet) {
+  if (!ACADEMY_SHEET_ID) return {};
   try {
     const auth = await getGoogleAuth().getClient();
     const sheets = google.sheets({ version: 'v4', auth });
-    await ensureSheet(sheets, ACADEMY_SHEET_ID, 'Sync Log');
 
+    // Update Sync Log
+    await ensureSheet(sheets, ACADEMY_SHEET_ID, 'Sync Log');
     const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
     const trueNew = statsAfter.active - statsBefore.active;
 
@@ -100,7 +200,6 @@ async function writeToAcademySheet(statsBefore, statsAfter) {
       valueInputOption: 'RAW',
       requestBody: { values: [['Last Synced', 'Total on List', 'Unsubscribes', 'Active Emails', 'New This Sync']] }
     });
-
     await sheets.spreadsheets.values.append({
       spreadsheetId: ACADEMY_SHEET_ID,
       range: "'Sync Log'!A1",
@@ -109,9 +208,14 @@ async function writeToAcademySheet(statsBefore, statsAfter) {
       requestBody: { values: [[now, statsAfter.total, statsAfter.unsub, statsAfter.active, trueNew]] }
     });
 
+    // Update MASTER_LIST
+    const masterStats = await updateMasterList(sheets, emailsSynced, unsubSet);
+
     console.log(`Academy sheet updated: ${now}, total=${statsAfter.total}, unsub=${statsAfter.unsub}, active=${statsAfter.active}, new=${trueNew}`);
+    return masterStats;
   } catch(e) {
     console.error('Academy sheet write error:', e.message);
+    return {};
   }
 }
 
@@ -254,17 +358,32 @@ app.post('/sync-membership-sheet', async (req, res) => {
   }
 });
 
+// Fetch all unsubscribed emails from CC — used by frontend before each Academy sync
+app.get('/unsubscribes', async (req, res) => {
+  try {
+    const token = await getValidToken();
+    const emails = await fetchAllUnsubscribes(token);
+    res.json({ emails: Array.from(emails), count: emails.size });
+  } catch(e) {
+    console.error('Unsubscribes fetch error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/sync-academy-sheet', async (req, res) => {
   try {
-    const { statsBefore } = req.body;
+    const { statsBefore, emailsSynced } = req.body;
     const token = await getValidToken();
+
+    // Fetch current unsubscribes from CC
+    const unsubSet = await fetchAllUnsubscribes(token);
 
     // Wait a few seconds for CC to process the import
     await new Promise(resolve => setTimeout(resolve, 5000));
 
     const statsAfter = await getAcademyListStats(token);
-    await writeToAcademySheet(statsBefore, statsAfter);
-    res.json({ success: true, statsBefore, statsAfter, trueNew: statsAfter.active - statsBefore.active });
+    const masterStats = await writeToAcademySheet(statsBefore, statsAfter, emailsSynced || [], unsubSet);
+    res.json({ success: true, statsBefore, statsAfter, trueNew: statsAfter.active - statsBefore.active, masterStats });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
