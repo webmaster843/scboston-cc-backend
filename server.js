@@ -403,22 +403,22 @@ app.post('/sync-membership-sheet', async (req, res) => {
   }
 });
 
-// TEMPORARY DEBUG — try all known CC status values and include email_address
+// TEMPORARY DEBUG — try status values without include param, show raw first contact
 app.get('/debug-bounces', async (req, res) => {
   try {
     const token = await getValidToken();
     const results = {};
-    const statuses = ['all', 'active', 'unsubscribed', 'deleted', 'bounced'];
+    const statuses = ['all', 'active', 'unsubscribed', 'bounced'];
     for (const status of statuses) {
       try {
-        const resp = await fetch(`https://api.cc.email/v3/contacts?status=${status}&limit=3&include=email_address`, {
+        const resp = await fetch(`https://api.cc.email/v3/contacts?status=${status}&limit=2`, {
           headers: { 'Authorization': 'Bearer ' + token }
         });
         const data = await resp.json();
         results[status] = {
-          count: (data.contacts || []).length,
           contacts_count: data.contacts_count,
-          sample: (data.contacts || []).map(c => ({ id: c.contact_id, email: c.email_address })),
+          count: (data.contacts || []).length,
+          first: data.contacts && data.contacts[0] ? data.contacts[0] : null,
           error: data.error_key || null
         };
       } catch(e) {
