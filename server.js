@@ -403,6 +403,20 @@ app.post('/sync-membership-sheet', async (req, res) => {
   }
 });
 
+// TEMPORARY DEBUG — inspect raw CC bounce/non_subscriber structure
+app.get('/debug-bounces', async (req, res) => {
+  try {
+    const token = await getValidToken();
+    const resp = await fetch('https://api.cc.email/v3/contacts?status=non_subscriber&limit=5', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    });
+    const data = await resp.json();
+    res.json(data);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Fetch all suppressed emails (unsubscribed + bounced) from CC
 app.get('/unsubscribes', async (req, res) => {
   try {
