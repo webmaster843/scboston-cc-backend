@@ -111,7 +111,38 @@ async function fetchAllUnsubscribes(token) {
   return emails;
 }
 
-async function updateMasterList(sheets, emailsSynced, unsubSet) {
+async function fetchAllBounces(token) {
+  const emails = new Set();
+  let cursor = null;
+  let page = 0;
+  try {
+    do {
+      const url = cursor
+        ? `https://api.cc.email/v3/contacts?status=non_subscriber&limit=500&cursor=${cursor}`
+        : `https://api.cc.email/v3/contacts?status=non_subscriber&limit=500`;
+      const resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+      const data = await resp.json();
+      (data.contacts || []).forEach(c => {
+        // non_subscriber includes bounced contacts; filter by bounce-related opt_in_sources
+        const addr = c.email_address && c.email_address.address;
+        const optOut = c.email_address && c.email_address.opt_out_source;
+        if (addr && (optOut === 'bounce' || optOut === 'hard_bounce' || optOut === 'soft_bounce')) {
+          emails.add(addr.toLowerCase().trim());
+        }
+      });
+      cursor = data._links && data._links.next
+        ? new URL('https://api.cc.email' + data._links.next.href).searchParams.get('cursor')
+        : null;
+      page++;
+    } while (cursor && page < 50);
+    console.log(`Fetched ${emails.size} bounced emails from CC`);
+  } catch(e) {
+    console.error('Failed to fetch bounces:', e.message);
+  }
+  return emails;
+}
+
+async function updateMasterList(sheets, emailsSynced, unsubSet, bounceSet) {
   await ensureSheet(sheets, ACADEMY_SHEET_ID, 'MASTER_LIST');
   const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York' });
 
@@ -135,20 +166,29 @@ async function updateMasterList(sheets, emailsSynced, unsubSet) {
   emailsSynced.forEach(email => {
     const key = email.toLowerCase().trim();
     if (unsubSet.has(key)) {
-      // Mark as unsubscribed
       if (masterMap.has(key)) {
         const rec = masterMap.get(key);
         rec[3] = 'unsubscribed';
-        if (!rec[4]) rec[4] = today; // set unsub date if not already set
+        if (!rec[4]) rec[4] = today;
         masterMap.set(key, rec);
       } else {
         masterMap.set(key, [key, today, today, 'unsubscribed', today]);
       }
+    } else if (bounceSet.has(key)) {
+      if (masterMap.has(key)) {
+        const rec = masterMap.get(key);
+        rec[3] = 'bounced';
+        if (!rec[4]) rec[4] = today;
+        masterMap.set(key, rec);
+      } else {
+        masterMap.set(key, [key, today, today, 'bounced', today]);
+      }
     } else {
       if (masterMap.has(key)) {
         const rec = masterMap.get(key);
-        rec[2] = today; // update last seen
-        if (rec[3] !== 'unsubscribed') rec[3] = 'active';
+        rec[2] = today;
+        // Only upgrade to active — don't overwrite unsubscribed/bounced
+        if (rec[3] !== 'unsubscribed' && rec[3] !== 'bounced') rec[3] = 'active';
         masterMap.set(key, rec);
       } else {
         masterMap.set(key, [key, today, today, 'active', '']);
@@ -156,17 +196,21 @@ async function updateMasterList(sheets, emailsSynced, unsubSet) {
     }
   });
 
-  // Also mark any emails in unsubSet that exist in master but weren't in this sync
+  // Also sweep master for any unsub/bounce emails not in this sync
   masterMap.forEach((rec, key) => {
     if (unsubSet.has(key) && rec[3] !== 'unsubscribed') {
       rec[3] = 'unsubscribed';
+      if (!rec[4]) rec[4] = today;
+      masterMap.set(key, rec);
+    } else if (bounceSet.has(key) && rec[3] !== 'unsubscribed' && rec[3] !== 'bounced') {
+      rec[3] = 'bounced';
       if (!rec[4]) rec[4] = today;
       masterMap.set(key, rec);
     }
   });
 
   const outputRows = [
-    ['Email', 'First Seen', 'Last Seen', 'Status', 'Unsubscribed Date'],
+    ['Email', 'First Seen', 'Last Seen', 'Status', 'Flagged Date'],
     ...Array.from(masterMap.values()).map(r => [r[0]||'', r[1]||'', r[2]||'', r[3]||'active', r[4]||''])
   ];
 
@@ -179,11 +223,12 @@ async function updateMasterList(sheets, emailsSynced, unsubSet) {
 
   const activeCount = outputRows.slice(1).filter(r => r[3] === 'active').length;
   const unsubCount = outputRows.slice(1).filter(r => r[3] === 'unsubscribed').length;
-  console.log(`MASTER_LIST updated: ${activeCount} active, ${unsubCount} unsubscribed`);
-  return { total: masterMap.size, active: activeCount, unsub: unsubCount };
+  const bounceCount = outputRows.slice(1).filter(r => r[3] === 'bounced').length;
+  console.log(`MASTER_LIST updated: ${activeCount} active, ${unsubCount} unsubscribed, ${bounceCount} bounced`);
+  return { total: masterMap.size, active: activeCount, unsub: unsubCount, bounced: bounceCount };
 }
 
-async function writeToAcademySheet(statsBefore, statsAfter, emailsSynced, unsubSet) {
+async function writeToAcademySheet(statsBefore, statsAfter, emailsSynced, unsubSet, bounceSet) {
   if (!ACADEMY_SHEET_ID) return {};
   try {
     const auth = await getGoogleAuth().getClient();
@@ -209,7 +254,7 @@ async function writeToAcademySheet(statsBefore, statsAfter, emailsSynced, unsubS
     });
 
     // Update MASTER_LIST
-    const masterStats = await updateMasterList(sheets, emailsSynced, unsubSet);
+    const masterStats = await updateMasterList(sheets, emailsSynced, unsubSet, bounceSet);
 
     console.log(`Academy sheet updated: ${now}, total=${statsAfter.total}, unsub=${statsAfter.unsub}, active=${statsAfter.active}, new=${trueNew}`);
     return masterStats;
@@ -358,12 +403,22 @@ app.post('/sync-membership-sheet', async (req, res) => {
   }
 });
 
-// Fetch all unsubscribed emails from CC — used by frontend before each Academy sync
+// Fetch all suppressed emails (unsubscribed + bounced) from CC
 app.get('/unsubscribes', async (req, res) => {
   try {
     const token = await getValidToken();
-    const emails = await fetchAllUnsubscribes(token);
-    res.json({ emails: Array.from(emails), count: emails.size });
+    const [unsubEmails, bounceEmails] = await Promise.all([
+      fetchAllUnsubscribes(token),
+      fetchAllBounces(token)
+    ]);
+    // Merge into one suppression set for the frontend
+    const allSuppressed = new Set([...unsubEmails, ...bounceEmails]);
+    res.json({
+      emails: Array.from(allSuppressed),
+      count: allSuppressed.size,
+      unsubCount: unsubEmails.size,
+      bounceCount: bounceEmails.size
+    });
   } catch(e) {
     console.error('Unsubscribes fetch error:', e.message);
     res.status(500).json({ error: e.message });
@@ -376,14 +431,17 @@ app.post('/sync-academy-sheet', async (req, res) => {
     console.log("sync-academy-sheet received emailsSynced count:", (emailsSynced || []).length);
     const token = await getValidToken();
 
-    // Fetch current unsubscribes from CC
-    const unsubSet = await fetchAllUnsubscribes(token);
+    // Fetch current unsubscribes and bounces from CC in parallel
+    const [unsubSet, bounceSet] = await Promise.all([
+      fetchAllUnsubscribes(token),
+      fetchAllBounces(token)
+    ]);
 
     // Wait a few seconds for CC to process the import
     await new Promise(resolve => setTimeout(resolve, 5000));
 
     const statsAfter = await getAcademyListStats(token);
-    const masterStats = await writeToAcademySheet(statsBefore, statsAfter, emailsSynced || [], unsubSet);
+    const masterStats = await writeToAcademySheet(statsBefore, statsAfter, emailsSynced || [], unsubSet, bounceSet);
     res.json({ success: true, statsBefore, statsAfter, trueNew: statsAfter.active - statsBefore.active, masterStats });
   } catch(e) {
     res.status(500).json({ error: e.message });
