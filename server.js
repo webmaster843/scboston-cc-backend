@@ -403,19 +403,29 @@ app.post('/sync-membership-sheet', async (req, res) => {
   }
 });
 
-// TEMPORARY DEBUG — inspect contact email_address structure to find bounce fields
+// TEMPORARY DEBUG — try all known CC status values and include email_address
 app.get('/debug-bounces', async (req, res) => {
   try {
     const token = await getValidToken();
-    const resp = await fetch('https://api.cc.email/v3/contacts?limit=10&include=email_address', {
-      headers: { 'Authorization': 'Bearer ' + token }
-    });
-    const data = await resp.json();
-    const sample = (data.contacts || []).map(c => ({
-      id: c.contact_id,
-      email: c.email_address
-    }));
-    res.json({ sample, total_count: data.contacts_count });
+    const results = {};
+    const statuses = ['all', 'active', 'unsubscribed', 'deleted', 'bounced'];
+    for (const status of statuses) {
+      try {
+        const resp = await fetch(`https://api.cc.email/v3/contacts?status=${status}&limit=3&include=email_address`, {
+          headers: { 'Authorization': 'Bearer ' + token }
+        });
+        const data = await resp.json();
+        results[status] = {
+          count: (data.contacts || []).length,
+          contacts_count: data.contacts_count,
+          sample: (data.contacts || []).map(c => ({ id: c.contact_id, email: c.email_address })),
+          error: data.error_key || null
+        };
+      } catch(e) {
+        results[status] = { error: e.message };
+      }
+    }
+    res.json(results);
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
