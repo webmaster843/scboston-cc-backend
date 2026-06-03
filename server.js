@@ -111,33 +111,22 @@ async function fetchAllUnsubscribes(token) {
   return emails;
 }
 
-async function fetchAllBounces(token) {
+async function readBounceList(sheets) {
   const emails = new Set();
-  let cursor = null;
-  let page = 0;
   try {
-    do {
-      const url = cursor
-        ? `https://api.cc.email/v3/contacts?status=non_subscriber&limit=500&cursor=${cursor}`
-        : `https://api.cc.email/v3/contacts?status=non_subscriber&limit=500`;
-      const resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
-      const data = await resp.json();
-      (data.contacts || []).forEach(c => {
-        // non_subscriber includes bounced contacts; filter by bounce-related opt_in_sources
-        const addr = c.email_address && c.email_address.address;
-        const optOut = c.email_address && c.email_address.opt_out_source;
-        if (addr && (optOut === 'bounce' || optOut === 'hard_bounce' || optOut === 'soft_bounce')) {
-          emails.add(addr.toLowerCase().trim());
-        }
-      });
-      cursor = data._links && data._links.next
-        ? new URL('https://api.cc.email' + data._links.next.href).searchParams.get('cursor')
-        : null;
-      page++;
-    } while (cursor && page < 50);
-    console.log(`Fetched ${emails.size} bounced emails from CC`);
+    await ensureSheet(sheets, ACADEMY_SHEET_ID, 'BOUNCE_LIST');
+    const resp = await sheets.spreadsheets.values.get({
+      spreadsheetId: ACADEMY_SHEET_ID,
+      range: "'BOUNCE_LIST'!A:A"
+    });
+    const rows = resp.data.values || [];
+    rows.forEach(r => {
+      const val = (r[0] || '').trim().toLowerCase();
+      if (val && val.includes('@') && val !== 'email') emails.add(val);
+    });
+    console.log(`Read ${emails.size} bounced emails from BOUNCE_LIST sheet`);
   } catch(e) {
-    console.error('Failed to fetch bounces:', e.message);
+    console.error('Failed to read BOUNCE_LIST:', e.message);
   }
   return emails;
 }
@@ -228,35 +217,35 @@ async function updateMasterList(sheets, emailsSynced, unsubSet, bounceSet) {
   return { total: masterMap.size, active: activeCount, unsub: unsubCount, bounced: bounceCount };
 }
 
-async function writeToAcademySheet(statsBefore, statsAfter, emailsSynced, unsubSet, bounceSet) {
+async function writeToAcademySheet(statsBefore, statsAfter, emailsSynced, unsubSet, bounceSet, sheetsClient) {
   if (!ACADEMY_SHEET_ID) return {};
   try {
-    const auth = await getGoogleAuth().getClient();
-    const sheets = google.sheets({ version: 'v4', auth });
+    const sheets = sheetsClient;
 
     // Update Sync Log
     await ensureSheet(sheets, ACADEMY_SHEET_ID, 'Sync Log');
     const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
     const trueNew = statsAfter.active - statsBefore.active;
+    const bounceCount = bounceSet ? bounceSet.size : 0;
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: ACADEMY_SHEET_ID,
       range: "'Sync Log'!A1",
       valueInputOption: 'RAW',
-      requestBody: { values: [['Last Synced', 'Total on List', 'Unsubscribes', 'Active Emails', 'New This Sync']] }
+      requestBody: { values: [['Last Synced', 'Total on List', 'Unsubscribes', 'Active Emails', 'New This Sync', 'Bounces on File']] }
     });
     await sheets.spreadsheets.values.append({
       spreadsheetId: ACADEMY_SHEET_ID,
       range: "'Sync Log'!A1",
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: [[now, statsAfter.total, statsAfter.unsub, statsAfter.active, trueNew]] }
+      requestBody: { values: [[now, statsAfter.total, statsAfter.unsub, statsAfter.active, trueNew, bounceCount]] }
     });
 
     // Update MASTER_LIST
     const masterStats = await updateMasterList(sheets, emailsSynced, unsubSet, bounceSet);
 
-    console.log(`Academy sheet updated: ${now}, total=${statsAfter.total}, unsub=${statsAfter.unsub}, active=${statsAfter.active}, new=${trueNew}`);
+    console.log(`Academy sheet updated: ${now}, total=${statsAfter.total}, unsub=${statsAfter.unsub}, active=${statsAfter.active}, new=${trueNew}, bounces=${bounceCount}`);
     return masterStats;
   } catch(e) {
     console.error('Academy sheet write error:', e.message);
@@ -403,43 +392,16 @@ app.post('/sync-membership-sheet', async (req, res) => {
   }
 });
 
-// TEMPORARY DEBUG — try status values without include param, show raw first contact
-app.get('/debug-bounces', async (req, res) => {
-  try {
-    const token = await getValidToken();
-    const results = {};
-    const statuses = ['all', 'active', 'unsubscribed', 'bounced'];
-    for (const status of statuses) {
-      try {
-        const resp = await fetch(`https://api.cc.email/v3/contacts?status=${status}&limit=2`, {
-          headers: { 'Authorization': 'Bearer ' + token }
-        });
-        const data = await resp.json();
-        results[status] = {
-          contacts_count: data.contacts_count,
-          count: (data.contacts || []).length,
-          first: data.contacts && data.contacts[0] ? data.contacts[0] : null,
-          error: data.error_key || null
-        };
-      } catch(e) {
-        results[status] = { error: e.message };
-      }
-    }
-    res.json(results);
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Fetch all suppressed emails (unsubscribed + bounced) from CC
+// Fetch all suppressed emails (unsubscribed from CC + bounced from sheet)
 app.get('/unsubscribes', async (req, res) => {
   try {
     const token = await getValidToken();
+    const auth = await getGoogleAuth().getClient();
+    const sheets = google.sheets({ version: 'v4', auth });
     const [unsubEmails, bounceEmails] = await Promise.all([
       fetchAllUnsubscribes(token),
-      fetchAllBounces(token)
+      readBounceList(sheets)
     ]);
-    // Merge into one suppression set for the frontend
     const allSuppressed = new Set([...unsubEmails, ...bounceEmails]);
     res.json({
       emails: Array.from(allSuppressed),
@@ -459,17 +421,19 @@ app.post('/sync-academy-sheet', async (req, res) => {
     console.log("sync-academy-sheet received emailsSynced count:", (emailsSynced || []).length);
     const token = await getValidToken();
 
-    // Fetch current unsubscribes and bounces from CC in parallel
+    // Fetch unsubscribes from CC and bounces from sheet in parallel
+    const auth = await getGoogleAuth().getClient();
+    const sheets = google.sheets({ version: 'v4', auth });
     const [unsubSet, bounceSet] = await Promise.all([
       fetchAllUnsubscribes(token),
-      fetchAllBounces(token)
+      readBounceList(sheets)
     ]);
 
     // Wait a few seconds for CC to process the import
     await new Promise(resolve => setTimeout(resolve, 5000));
 
     const statsAfter = await getAcademyListStats(token);
-    const masterStats = await writeToAcademySheet(statsBefore, statsAfter, emailsSynced || [], unsubSet, bounceSet);
+    const masterStats = await writeToAcademySheet(statsBefore, statsAfter, emailsSynced || [], unsubSet, bounceSet, sheets);
     res.json({ success: true, statsBefore, statsAfter, trueNew: statsAfter.active - statsBefore.active, masterStats });
   } catch(e) {
     res.status(500).json({ error: e.message });
