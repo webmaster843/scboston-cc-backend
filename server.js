@@ -167,6 +167,27 @@ async function getValidToken() {
   return storedTokens.access_token;
 }
 
+// NEW: Clean auth status endpoint — never throws, always returns JSON
+app.get('/auth-status', (req, res) => {
+  const hasRefreshToken = !!storedTokens.refresh_token;
+  const hasValidToken = !!storedTokens.access_token && Date.now() < storedTokens.expires_at;
+  const minutesLeft = hasValidToken ? Math.round((storedTokens.expires_at - Date.now()) / 60000) : 0;
+
+  if (hasValidToken) {
+    res.json({ status: 'authorized', minutesLeft, message: `Token valid for ~${minutesLeft} more minutes` });
+  } else if (hasRefreshToken) {
+    res.json({ status: 'can_refresh', minutesLeft: 0, message: 'Token expired but refresh token available — will auto-refresh on next sync' });
+  } else {
+    res.json({ status: 'unauthorized', minutesLeft: 0, message: 'Not authorized — click Authorize below' });
+  }
+});
+
+// NEW: Auth URL endpoint — returns the CC OAuth URL so the frontend can open it
+app.get('/auth-url', (req, res) => {
+  const url = `https://authz.constantcontact.com/oauth2/default/v1/authorize?client_id=${CC_API_KEY}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=code&scope=contact_data&state=abc123`;
+  res.json({ url });
+});
+
 app.get('/token', async (req, res) => {
   try {
     const token = await getValidToken();
@@ -272,7 +293,18 @@ app.get('/callback', async (req, res) => {
       storedTokens.expires_at = Date.now() + (data.expires_in * 1000) - 60000;
       console.log('Authorization successful. Token expires in', data.expires_in, 'seconds');
       await saveRefreshToken(data.refresh_token);
-      res.send('<h2>Authorization successful!</h2><p>You can close this tab. The backend is now connected to Constant Contact.</p>');
+      // Close the tab automatically after success
+      res.send(`
+        <html><head><title>Authorized</title></head>
+        <body style="font-family:system-ui;text-align:center;padding:60px;background:#f5f5f3">
+          <div style="max-width:400px;margin:0 auto;background:#fff;border-radius:16px;padding:40px;border:1px solid #e5e5e0">
+            <div style="font-size:48px;margin-bottom:16px">✅</div>
+            <h2 style="font-weight:500;margin-bottom:8px">Authorization successful!</h2>
+            <p style="color:#666;font-size:14px">The backend is now connected to Constant Contact.<br>You can close this tab.</p>
+            <script>setTimeout(() => window.close(), 2000);<\/script>
+          </div>
+        </body></html>
+      `);
     } else {
       console.error('Auth failed:', JSON.stringify(data));
       res.status(500).send('<h2>Authorization failed</h2><pre>' + JSON.stringify(data, null, 2) + '</pre>');
