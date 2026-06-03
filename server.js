@@ -6,7 +6,7 @@ const { google } = require('googleapis');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const CC_API_KEY = process.env.CC_API_KEY;
@@ -373,6 +373,7 @@ app.get('/unsubscribes', async (req, res) => {
 app.post('/sync-academy-sheet', async (req, res) => {
   try {
     const { statsBefore, emailsSynced } = req.body;
+    console.log("sync-academy-sheet received emailsSynced count:", (emailsSynced || []).length);
     const token = await getValidToken();
 
     // Fetch current unsubscribes from CC
