@@ -403,15 +403,19 @@ app.post('/sync-membership-sheet', async (req, res) => {
   }
 });
 
-// TEMPORARY DEBUG — inspect raw CC bounce/non_subscriber structure
+// TEMPORARY DEBUG — inspect contact email_address structure to find bounce fields
 app.get('/debug-bounces', async (req, res) => {
   try {
     const token = await getValidToken();
-    const resp = await fetch('https://api.cc.email/v3/contacts?status=non_subscriber&limit=5', {
+    const resp = await fetch('https://api.cc.email/v3/contacts?limit=10&include=email_address', {
       headers: { 'Authorization': 'Bearer ' + token }
     });
     const data = await resp.json();
-    res.json(data);
+    const sample = (data.contacts || []).map(c => ({
+      id: c.contact_id,
+      email: c.email_address
+    }));
+    res.json({ sample, total_count: data.contacts_count });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
