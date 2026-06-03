@@ -28,6 +28,8 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
 .btn:active{transform:scale(.98)}
 .btn-primary{background:#1a1a1a;color:#fff;border-color:#1a1a1a}
 .btn-primary:hover{background:#333}
+.btn-auth{background:#f5a623;color:#fff;border-color:#e09520;font-weight:500}
+.btn-auth:hover{background:#e09520}
 .btn-sm{padding:6px 11px;font-size:12px}
 .btn-group{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:1rem}
 .status{border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:1rem;display:none}
@@ -43,10 +45,6 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
 .metric{background:#f8f8f6;border-radius:8px;padding:12px 14px}
 .metric .val{font-size:22px;font-weight:500;line-height:1.2;color:#1a1a1a}
 .metric .lbl{font-size:11px;color:#888;margin-top:2px}
-.backend-status{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;border-radius:6px;font-weight:500;margin-bottom:12px}
-.backend-ok{background:#e6f4ea;color:#1a6e35}
-.backend-err{background:#fce8e8;color:#9e2020}
-.backend-checking{background:#f0f0ee;color:#666}
 .hint{font-size:11px;color:#999;margin-top:-6px;margin-bottom:10px;line-height:1.5}
 .list-id-row{display:grid;grid-template-columns:180px 1fr;gap:8px;align-items:center;margin-bottom:6px}
 .list-id-row span{font-size:12px;color:#666}
@@ -54,6 +52,15 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
 .breakdown-row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:0.5px solid #f0f0ee;font-size:12px}
 .breakdown-row:last-child{border-bottom:none}
 .saved-badge{font-size:11px;color:#1a6e35;margin-left:8px;display:none}
+
+/* Auth status banner */
+.auth-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:13px;transition:background .3s}
+.auth-banner.checking{background:#f0f0ee;color:#666}
+.auth-banner.authorized{background:#e6f4ea;color:#1a6e35}
+.auth-banner.can-refresh{background:#fff8e1;color:#8a6200}
+.auth-banner.unauthorized{background:#fce8e8;color:#9e2020}
+.auth-banner .auth-msg{display:flex;align-items:center;gap:8px;font-weight:500}
+.auth-banner .auth-sub{font-size:11px;opacity:.75;margin-top:2px}
 </style>
 </head>
 <body>
@@ -62,21 +69,29 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
   <p class="subtitle">Process membership and academy exports, then sync directly to Constant Contact.</p>
 
   <div class="tabs">
-    <div class="tab active" onclick="switchTab('settings')"><i class="ti ti-settings" style="font-size:15px"></i> Settings</div>
-    <div class="tab" onclick="switchTab('membership')"><i class="ti ti-users" style="font-size:15px"></i> Membership sync</div>
-    <div class="tab" onclick="switchTab('academy')"><i class="ti ti-star" style="font-size:15px"></i> Academy sync</div>
+    <div class="tab active" onclick="switchTab('settings', event)"><i class="ti ti-settings" style="font-size:15px"></i> Settings</div>
+    <div class="tab" onclick="switchTab('membership', event)"><i class="ti ti-users" style="font-size:15px"></i> Membership sync</div>
+    <div class="tab" onclick="switchTab('academy', event)"><i class="ti ti-star" style="font-size:15px"></i> Academy sync</div>
   </div>
 
   <!-- SETTINGS -->
   <div class="panel active" id="panel-settings">
 
     <div class="card">
-      <div class="section-title">Backend connection</div>
-      <div id="backend-status" class="backend-status backend-checking"><i class="ti ti-refresh" style="font-size:13px"></i> Checking...</div>
-      <div style="font-size:12px;color:#666;margin-bottom:10px">
-        Your Render backend handles Constant Contact authentication automatically. No token pasting needed.
+      <div class="section-title">Constant Contact authorization</div>
+
+      <!-- Auth banner -->
+      <div class="auth-banner checking" id="auth-banner">
+        <div>
+          <div class="auth-msg"><i class="ti ti-refresh" style="font-size:15px"></i> <span id="auth-banner-msg">Checking authorization...</span></div>
+          <div class="auth-sub" id="auth-banner-sub"></div>
+        </div>
+        <div id="auth-banner-action"></div>
       </div>
-      <button class="btn btn-sm" onclick="checkBackend()"><i class="ti ti-refresh" style="font-size:13px"></i> Check connection</button>
+
+      <div style="font-size:12px;color:#666;line-height:1.6">
+        Click <strong>Authorize</strong> to connect this tool to Constant Contact. You'll be taken to the CC login page in a new tab — once you approve, that tab closes automatically and the tool is ready. You only need to do this again if authorization expires (roughly every 24 hours when the backend is inactive).
+      </div>
     </div>
 
     <div class="card">
@@ -176,35 +191,93 @@ let S = {
   memData: {},
   unsubSet: new Set(),
   acadEmails: [],
-  acadSynced: new Set()
+  acadSynced: new Set(),
+  authPolling: null
 };
+
+// ─── AUTH STATUS ───────────────────────────────────────────────
+
+async function checkAuthStatus() {
+  const banner = document.getElementById('auth-banner');
+  const msg = document.getElementById('auth-banner-msg');
+  const sub = document.getElementById('auth-banner-sub');
+  const action = document.getElementById('auth-banner-action');
+
+  try {
+    const resp = await fetch(BACKEND + '/auth-status');
+    const data = await resp.json();
+
+    if (data.status === 'authorized') {
+      banner.className = 'auth-banner authorized';
+      msg.innerHTML = '<i class="ti ti-circle-check" style="font-size:15px"></i> Connected to Constant Contact';
+      sub.textContent = data.message;
+      action.innerHTML = `<button class="btn btn-sm" onclick="triggerAuth()"><i class="ti ti-refresh" style="font-size:13px"></i> Re-authorize</button>`;
+    } else if (data.status === 'can_refresh') {
+      banner.className = 'auth-banner can-refresh';
+      msg.innerHTML = '<i class="ti ti-alert-triangle" style="font-size:15px"></i> Token expired — will auto-refresh on next sync';
+      sub.textContent = 'Or click Authorize to refresh now';
+      action.innerHTML = `<button class="btn btn-auth btn-sm" onclick="triggerAuth()"><i class="ti ti-key" style="font-size:13px"></i> Authorize</button>`;
+    } else {
+      banner.className = 'auth-banner unauthorized';
+      msg.innerHTML = '<i class="ti ti-alert-circle" style="font-size:15px"></i> Not authorized';
+      sub.textContent = 'Click Authorize to connect to Constant Contact';
+      action.innerHTML = `<button class="btn btn-auth btn-sm" onclick="triggerAuth()"><i class="ti ti-key" style="font-size:13px"></i> Authorize</button>`;
+    }
+  } catch(e) {
+    banner.className = 'auth-banner unauthorized';
+    msg.innerHTML = '<i class="ti ti-wifi-off" style="font-size:15px"></i> Backend unreachable';
+    sub.textContent = 'The backend may be waking up — wait 30 seconds and refresh';
+    action.innerHTML = `<button class="btn btn-sm" onclick="checkAuthStatus()"><i class="ti ti-refresh" style="font-size:13px"></i> Retry</button>`;
+  }
+}
+
+async function triggerAuth() {
+  try {
+    const resp = await fetch(BACKEND + '/auth-url');
+    const data = await resp.json();
+    const authWindow = window.open(data.url, '_blank');
+
+    // Poll auth status every 3 seconds while waiting for callback
+    if (S.authPolling) clearInterval(S.authPolling);
+    const banner = document.getElementById('auth-banner');
+    const msg = document.getElementById('auth-banner-msg');
+    const sub = document.getElementById('auth-banner-sub');
+    banner.className = 'auth-banner checking';
+    msg.innerHTML = '<i class="ti ti-loader" style="font-size:15px"></i> Waiting for authorization...';
+    sub.textContent = 'Complete the login in the tab that just opened';
+
+    S.authPolling = setInterval(async () => {
+      try {
+        const r = await fetch(BACKEND + '/auth-status');
+        const d = await r.json();
+        if (d.status === 'authorized') {
+          clearInterval(S.authPolling);
+          S.authPolling = null;
+          checkAuthStatus();
+        }
+      } catch(e) { /* keep polling */ }
+    }, 3000);
+
+    // Stop polling after 5 minutes
+    setTimeout(() => {
+      if (S.authPolling) { clearInterval(S.authPolling); S.authPolling = null; }
+    }, 300000);
+
+  } catch(e) {
+    alert('Could not reach backend to get auth URL. It may be waking up — wait 30 seconds and try again.');
+  }
+}
+
+// ─── CORE ──────────────────────────────────────────────────────
 
 async function getToken() {
   const resp = await fetch(BACKEND + '/token');
   const data = await resp.json();
+  if (!data.access_token) throw new Error(data.error || 'No token returned');
   return data.access_token;
 }
 
-async function checkBackend() {
-  const el = document.getElementById('backend-status');
-  el.className = 'backend-status backend-checking';
-  el.innerHTML = '<i class="ti ti-refresh" style="font-size:13px"></i> Checking...';
-  try {
-    const resp = await fetch(BACKEND + '/token');
-    const data = await resp.json();
-    if (data.access_token) {
-      el.className = 'backend-status backend-ok';
-      el.innerHTML = '<i class="ti ti-circle-check" style="font-size:13px"></i> Connected to Constant Contact';
-    } else {
-      throw new Error('No token');
-    }
-  } catch(e) {
-    el.className = 'backend-status backend-err';
-    el.innerHTML = '<i class="ti ti-alert-circle" style="font-size:13px"></i> Backend not reachable — may be waking up, try again in 30 seconds';
-  }
-}
-
-function switchTab(t) {
+function switchTab(t, event) {
   document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(el => el.classList.remove('active'));
   event.currentTarget.classList.add('active');
@@ -353,7 +426,7 @@ async function ccImport(listId, contacts, logId) {
   try {
     token = await getToken();
   } catch(e) {
-    log(logId, 'Could not reach backend to get token. It may be waking up — wait 30 seconds and try again.', 'err');
+    log(logId, 'Not authorized. Go to Settings and click Authorize first.', 'err');
     return 0;
   }
 
@@ -488,7 +561,7 @@ function exportAcademyCSV() {
 
 buildListIdsGrid();
 S.acadListId = '132ca7fe-47cb-11f1-bdf1-02420a320003';
-checkBackend();
+checkAuthStatus();
 </script>
 </body>
 </html>
