@@ -154,6 +154,11 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
       <button class="btn btn-sm" onclick="parseAcadRaw()"><i class="ti ti-table-import" style="font-size:13px"></i> Parse data</button>
     </div>
 
+    <div class="card" id="acad-unsub-card" style="display:none">
+      <div class="section-title">Step 2 — Unsubscribe suppression</div>
+      <div id="acad-unsub-status" class="hint" style="margin-bottom:0;color:#888">Unsubscribes will be fetched automatically from Constant Contact when you sync.</div>
+    </div>
+
     <div id="acad-preview" style="display:none;margin-bottom:1rem">
       <div class="metrics" id="acad-metrics"></div>
     </div>
@@ -192,6 +197,7 @@ let S = {
   unsubSet: new Set(),
   acadEmails: [],
   acadSynced: new Set(),
+  acadUnsubSet: new Set(),
   authPolling: null
 };
 
@@ -414,8 +420,10 @@ function parseAcadRaw() {
   document.getElementById('acad-metrics').innerHTML = `
     <div class="metric"><div class="val">${S.acadEmails.length}</div><div class="lbl">Unique emails</div></div>
     <div class="metric"><div class="val">${S.acadSynced.size}</div><div class="lbl">Already synced</div></div>
-    <div class="metric"><div class="val">${newCount}</div><div class="lbl">New to push</div></div>`;
+    <div class="metric"><div class="val">${newCount}</div><div class="lbl">New to push</div></div>
+    <div class="metric" id="acad-unsub-metric" style="display:none"><div class="val" id="acad-unsub-val">—</div><div class="lbl">Suppressed (unsub)</div></div>`;
 
+  document.getElementById('acad-unsub-card').style.display = 'block';
   document.getElementById('acad-preview').style.display = 'block';
   showStatus('acad-status', `Found ${S.acadEmails.length} unique emails. ${newCount} are new this session.`, 'success');
 }
@@ -511,29 +519,57 @@ async function runAcademySync() {
   const logEl = document.getElementById('acad-log');
   logEl.innerHTML = ''; logEl.classList.add('show');
 
-  const newEmails = S.acadEmails.filter(e => !S.acadSynced.has(e));
-  if (!newEmails.length) { showStatus('acad-status','All emails already synced this session. Nothing new to push.','warning'); return; }
+  // Step 1: Fetch unsubscribes from CC
+  showStatus('acad-status', 'Fetching unsubscribed emails from Constant Contact...', 'info');
+  log('acad-log', 'Fetching unsubscribe list from CC...');
+  try {
+    const unsubResp = await fetch(BACKEND + '/unsubscribes');
+    const unsubData = await unsubResp.json();
+    S.acadUnsubSet = new Set(unsubData.emails || []);
+    log('acad-log', `${S.acadUnsubSet.size} unsubscribed emails loaded.`, 'ok');
 
-  showStatus('acad-status', `Syncing ${newEmails.length} new emails...`, 'info');
+    // Show suppressed metric
+    const suppressed = S.acadEmails.filter(e => S.acadUnsubSet.has(e)).length;
+    document.getElementById('acad-unsub-val').textContent = suppressed;
+    document.getElementById('acad-unsub-metric').style.display = '';
+    document.getElementById('acad-unsub-status').textContent = `${S.acadUnsubSet.size} total unsubscribes on file — ${suppressed} in this export will be suppressed.`;
+  } catch(e) {
+    log('acad-log', 'Could not fetch unsubscribes: ' + e.message + ' — proceeding without suppression.', 'warn');
+    S.acadUnsubSet = new Set();
+  }
+
+  // Step 2: Filter out unsubscribed and already-synced
+  const newEmails = S.acadEmails.filter(e => !S.acadSynced.has(e) && !S.acadUnsubSet.has(e));
+  if (!newEmails.length) { showStatus('acad-status','No new emails to push (all are either already synced or unsubscribed).','warning'); return; }
+
+  showStatus('acad-status', `Syncing ${newEmails.length} emails (${S.acadEmails.filter(e=>S.acadUnsubSet.has(e)).length} suppressed as unsubscribed)...`, 'info');
   const contacts = newEmails.map(e => ({ email: e, firstName:'', lastName:'' }));
   const pushed = await ccImport(listId, contacts, 'acad-log');
 
   if (pushed > 0) {
     newEmails.forEach(e => S.acadSynced.add(e));
-    log('acad-log', 'Updating academy sheet...');
+    log('acad-log', 'Updating academy sheet and master list...');
     try {
       const sheetResp = await fetch(BACKEND + '/sync-academy-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ statsBefore: S.lastStatsBefore || null })
+        body: JSON.stringify({
+          statsBefore: S.lastStatsBefore || null,
+          emailsSynced: S.acadEmails  // send ALL emails (including unsubs) so master list is complete
+        })
       });
       const sheetData = await sheetResp.json();
-      if (sheetData.success) log('acad-log', 'Academy sheet updated.', 'ok');
-      else log('acad-log', 'Sheet update failed: ' + JSON.stringify(sheetData), 'warn');
+      if (sheetData.success) {
+        const ms = sheetData.masterStats || {};
+        log('acad-log', `Academy sheet updated. Master list: ${ms.total||0} total, ${ms.active||0} active, ${ms.unsub||0} unsubscribed.`, 'ok');
+      } else {
+        log('acad-log', 'Sheet update failed: ' + JSON.stringify(sheetData), 'warn');
+      }
     } catch(e) {
       log('acad-log', 'Sheet update error: ' + e.message, 'warn');
     }
-    showStatus('acad-status', `Sync complete. ${pushed} new emails pushed. ${S.acadSynced.size} total synced this session.`, 'success');
+    const suppressed = S.acadEmails.filter(e => S.acadUnsubSet.has(e)).length;
+    showStatus('acad-status', `Sync complete. ${pushed} emails pushed. ${suppressed} suppressed (unsubscribed). ${S.acadSynced.size} total synced this session.`, 'success');
   } else {
     showStatus('acad-status', 'No emails were pushed. Check the log below for details.', 'error');
   }
