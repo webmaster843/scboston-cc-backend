@@ -526,13 +526,15 @@ async function runAcademySync() {
     const unsubResp = await fetch(BACKEND + '/unsubscribes');
     const unsubData = await unsubResp.json();
     S.acadUnsubSet = new Set(unsubData.emails || []);
-    log('acad-log', `${S.acadUnsubSet.size} unsubscribed emails loaded.`, 'ok');
+    const unsubCount = unsubData.unsubCount || 0;
+    const bounceCount = unsubData.bounceCount || 0;
+    log('acad-log', `${S.acadUnsubSet.size} suppressed emails loaded (${unsubCount} unsubscribed, ${bounceCount} bounced).`, 'ok');
 
     // Show suppressed metric
     const suppressed = S.acadEmails.filter(e => S.acadUnsubSet.has(e)).length;
     document.getElementById('acad-unsub-val').textContent = suppressed;
     document.getElementById('acad-unsub-metric').style.display = '';
-    document.getElementById('acad-unsub-status').textContent = `${S.acadUnsubSet.size} total unsubscribes on file — ${suppressed} in this export will be suppressed.`;
+    document.getElementById('acad-unsub-status').textContent = `${unsubCount} unsubscribed + ${bounceCount} bounced on file — ${suppressed} in this export will be suppressed.`;
   } catch(e) {
     log('acad-log', 'Could not fetch unsubscribes: ' + e.message + ' — proceeding without suppression.', 'warn');
     S.acadUnsubSet = new Set();
@@ -561,7 +563,7 @@ async function runAcademySync() {
       const sheetData = await sheetResp.json();
       if (sheetData.success) {
         const ms = sheetData.masterStats || {};
-        log('acad-log', `Academy sheet updated. Master list: ${ms.total||0} total, ${ms.active||0} active, ${ms.unsub||0} unsubscribed.`, 'ok');
+        log('acad-log', `Academy sheet updated. Master list: ${ms.total||0} total, ${ms.active||0} active, ${ms.unsub||0} unsubscribed, ${ms.bounced||0} bounced.`, 'ok');
       } else {
         log('acad-log', 'Sheet update failed: ' + JSON.stringify(sheetData), 'warn');
       }
@@ -569,7 +571,7 @@ async function runAcademySync() {
       log('acad-log', 'Sheet update error: ' + e.message, 'warn');
     }
     const suppressed = S.acadEmails.filter(e => S.acadUnsubSet.has(e)).length;
-    showStatus('acad-status', `Sync complete. ${pushed} emails pushed. ${suppressed} suppressed (unsubscribed). ${S.acadSynced.size} total synced this session.`, 'success');
+    showStatus('acad-status', `Sync complete. ${pushed} emails pushed. ${suppressed} suppressed (unsubscribed/bounced). ${S.acadSynced.size} total synced this session.`, 'success');
   } else {
     showStatus('acad-status', 'No emails were pushed. Check the log below for details.', 'error');
   }
