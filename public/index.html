@@ -344,14 +344,13 @@ function parseMemRaw() {
 
   const rows = parseRows(raw);
   if (rows.length < 2) { showStatus('mem-status','Not enough data found. Check your paste.','error'); return; }
-  const headers = rows[0].map(h => h.toLowerCase());
 
-  const emailCol = headers.findIndex(h => h.includes('email'));
-  const nameCol  = headers.findIndex(h => h.includes('customer') || h.includes('name'));
-  const pkgCol   = headers.findIndex(h => h.includes('package'));
-  const zipCol   = headers.findIndex(h => h.toLowerCase() === 'zip code');
-
-  if (emailCol === -1) { showStatus('mem-status','No email column found. Check headers include "email".','error'); return; }
+  // ActiveNet exports use a multi-row block format (4 rows per contact):
+  //   Row 1: col0=PackageName (only on first of a package), col3=Name (p)
+  //   Row 2: col3=email
+  //   Row 3: col3=street address
+  //   Row 4: col3=City, ST Zip  <-- zip extracted via regex
+  // We walk data rows in groups of 4, tracking the last seen package name.
 
   S.unsubSet = new Set();
   if (unsub.trim()) {
@@ -364,20 +363,41 @@ function parseMemRaw() {
   const byType = {};
   const seen = new Set();
   let skipped = 0;
+  let currentPkg = 'Unknown';
+  const dataRows = rows.slice(1); // skip header
 
-  rows.slice(1).forEach(r => {
-    const email = (r[emailCol] || '').trim().toLowerCase();
-    const rawPkg = pkgCol !== -1 ? (r[pkgCol] || 'Unknown') : 'Unknown';
-    const pkg = rawPkg.replace(/\(p\)/gi,'').trim();
-    if (!validEmail(email)) { skipped++; return; }
-    if (S.unsubSet.has(email)) { skipped++; return; }
-    if (seen.has(email)) return;
+  for (let i = 0; i < dataRows.length; i += 4) {
+    const r0 = dataRows[i]     || [];  // name row
+    const r1 = dataRows[i + 1] || [];  // email row
+    const r2 = dataRows[i + 2] || [];  // street row
+    const r3 = dataRows[i + 3] || [];  // city/state/zip row
+
+    // Package name appears in col 0 when it changes
+    const pkgCell = (r0[0] || '').replace(/\(p\)/gi,'').trim();
+    if (pkgCell) currentPkg = pkgCell;
+
+    // Name is in col 3, formatted "Last, First (p)"
+    const rawName = (r0[3] || '').replace(/\(p\)/gi,'').trim();
+    const nameParts = rawName.split(',').map(s => s.trim());
+    const lastName  = nameParts[0] || '';
+    const firstName = nameParts[1] || '';
+
+    // Email is in col 3 of row 1
+    const email = (r1[3] || '').trim().toLowerCase();
+
+    // Zip: extract 5-digit zip from "City, ST Zip" line (col 3 of row 3)
+    const cityLine = r3[3] || '';
+    const zipMatch = cityLine.match(/\b(\d{5})(-\d{4})?\b/);
+    const zip = zipMatch ? zipMatch[1] : '';
+
+    if (!validEmail(email)) { skipped++; continue; }
+    if (S.unsubSet.has(email)) { skipped++; continue; }
+    if (seen.has(email)) continue;
     seen.add(email);
-    const nameParts = nameCol !== -1 ? (r[nameCol] || '').split(',').map(s => s.trim()) : ['',''];
-    const zip = zipCol !== -1 ? (r[zipCol] || '').trim() : '';
-    if (!byType[pkg]) byType[pkg] = [];
-    byType[pkg].push({ email, firstName: nameParts[1]||'', lastName: nameParts[0]||'', pkg, zip });
-  });
+
+    if (!byType[currentPkg]) byType[currentPkg] = [];
+    byType[currentPkg].push({ email, firstName, lastName, pkg: currentPkg, zip });
+  }
 
   S.memData = byType;
   const total = Object.values(byType).reduce((s,a) => s+a.length, 0);
