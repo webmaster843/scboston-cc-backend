@@ -345,12 +345,37 @@ function parseMemRaw() {
   const rows = parseRows(raw);
   if (rows.length < 2) { showStatus('mem-status','Not enough data found. Check your paste.','error'); return; }
 
-  // ActiveNet exports use a multi-row block format (4 rows per contact):
-  //   Row 1: col0=PackageName (only on first of a package), col3=Name (p)
-  //   Row 2: col3=email
-  //   Row 3: col3=street address
-  //   Row 4: col3=City, ST Zip  <-- zip extracted via regex
-  // We walk data rows in groups of 4, tracking the last seen package name.
+  // ActiveNet "Memberships by Package (Detail)" export format:
+  // - Several header rows precede data (title, date, column labels)
+  // - Package name appears in col0 only on the first contact of each section
+  //   (and may wrap across multiple rows for long names like "Full-Time Club / Coach")
+  // - Every contact name row has "(p)" in col3
+  // - Contact block: row0=name, row1=email, row2=street, row3=city/state/zip
+  //
+  // Package normalisation: many ActiveNet package variants map to a single CC list.
+  const PKG_MAP = {
+    'alumni':                         'Alumni',
+    'family':                         'Family',
+    'family membership':              'Family',
+    'family (hayden)':                'Family',
+    'single':                         'Single',
+    'single membership':              'Single',
+    'single (hayden)':                'Single',
+    'introductory':                   'Introductory',
+    'friends of the club':            'Friends of the Club',
+    'friends of the club membership': 'Friends of the Club',
+    'honorary':                       'Honorary',
+    'officials':                      'Official',
+  };
+  function normalisePkg(raw) {
+    const key = raw.toLowerCase().trim();
+    if (PKG_MAP[key]) return PKG_MAP[key];
+    if (key.includes('coach')) return 'Coaches';
+    if (key.includes('team'))  return 'Team';
+    if (key.includes('u.s.') || key.includes('world') || key.includes('championship') || key.includes('competitor'))
+      return 'U.S./World Championships Competitor';
+    return null;
+  }
 
   S.unsubSet = new Set();
   if (unsub.trim()) {
@@ -360,43 +385,62 @@ function parseMemRaw() {
     if (uec !== -1) urows.slice(1).forEach(r => { if (r[uec]) S.unsubSet.add(r[uec].toLowerCase().trim()); });
   }
 
+  const SKIP_COL0 = new Set(['package name', 'memberships by package (detail)', '']);
   const byType = {};
   const seen = new Set();
   let skipped = 0;
-  let currentPkg = 'Unknown';
-  const dataRows = rows.slice(1); // skip header
+  let currentPkgRaw = '';
+  let currentPkg = null;
 
-  for (let i = 0; i < dataRows.length; i += 4) {
-    const r0 = dataRows[i]     || [];  // name row
-    const r1 = dataRows[i + 1] || [];  // email row
-    const r2 = dataRows[i + 2] || [];  // street row
-    const r3 = dataRows[i + 3] || [];  // city/state/zip row
+  // Find the actual data start: first row where col3 contains "(p)"
+  let dataStart = 0;
+  for (let i = 0; i < rows.length; i++) {
+    if ((rows[i][3] || '').includes('(p)')) { dataStart = i; break; }
+  }
 
-    // Package name appears in col 0 when it changes
-    const pkgCell = (r0[0] || '').replace(/\(p\)/gi,'').trim();
-    if (pkgCell) currentPkg = pkgCell;
+  for (let i = dataStart; i < rows.length; i++) {
+    const r = rows[i] || [];
+    const col0 = (r[0] || '').trim();
+    const col3 = (r[3] || '').trim();
 
-    // Name is in col 3, formatted "Last, First (p)"
-    const rawName = (r0[3] || '').replace(/\(p\)/gi,'').trim();
-    const nameParts = rawName.split(',').map(s => s.trim());
-    const lastName  = nameParts[0] || '';
-    const firstName = nameParts[1] || '';
+    // Update package when col0 has a real value
+    if (col0 && !SKIP_COL0.has(col0.toLowerCase())) {
+      if (col3.includes('(p)')) {
+        // col0 = new package name, col3 = first contact of that package
+        currentPkgRaw = col0;
+        currentPkg = normalisePkg(currentPkgRaw);
+      } else {
+        // col0 is a continuation fragment of a wrapped package name
+        currentPkgRaw = currentPkgRaw ? currentPkgRaw + ' ' + col0 : col0;
+        currentPkg = normalisePkg(currentPkgRaw);
+        continue;
+      }
+    }
 
-    // Email is in col 3 of row 1
-    const email = (r1[3] || '').trim().toLowerCase();
+    // Contact row: col3 has "(p)"
+    if (col3.includes('(p)') && currentPkg) {
+      const nameRaw = col3.replace(/\(p\)/gi,'').replace(/\(S\)/gi,'').trim();
+      const nameParts = nameRaw.split(',').map(s => s.trim());
+      const lastName  = nameParts[0] || '';
+      const firstName = nameParts[1] || '';
 
-    // Zip: extract 5-digit zip from "City, ST Zip" line (col 3 of row 3)
-    const cityLine = r3[3] || '';
-    const zipMatch = cityLine.match(/\b(\d{5})(-\d{4})?\b/);
-    const zip = zipMatch ? zipMatch[1] : '';
+      // row+1 = email, row+3 = city/state/zip
+      const emailRow = rows[i + 1] || [];
+      const email = (emailRow[3] || '').trim().toLowerCase();
 
-    if (!validEmail(email)) { skipped++; continue; }
-    if (S.unsubSet.has(email)) { skipped++; continue; }
-    if (seen.has(email)) continue;
-    seen.add(email);
+      const zipRow = rows[i + 3] || [];
+      const cityLine = (zipRow[3] || '').trim();
+      const zipMatch = cityLine.match(/\b(\d{5})(-\d{4})?\b/);
+      const zip = zipMatch ? zipMatch[1] : '';
 
-    if (!byType[currentPkg]) byType[currentPkg] = [];
-    byType[currentPkg].push({ email, firstName, lastName, pkg: currentPkg, zip });
+      if (!validEmail(email)) { skipped++; continue; }
+      if (S.unsubSet.has(email)) { skipped++; continue; }
+      if (seen.has(email)) continue;
+      seen.add(email);
+
+      if (!byType[currentPkg]) byType[currentPkg] = [];
+      byType[currentPkg].push({ email, firstName, lastName, pkg: currentPkg, zip });
+    }
   }
 
   S.memData = byType;
