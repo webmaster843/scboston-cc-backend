@@ -149,7 +149,7 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
 
     <div class="card">
       <div class="section-title">Step 1 — Household export</div>
-      <div class="hint" style="margin-bottom:8px">Must include columns named <code>P1 Email</code> and/or <code>P2 Email</code>.</div>
+      <div class="hint" style="margin-bottom:8px">Must include columns named <code>P1 Email</code> and/or <code>P2 Email</code>. Include a <code>Zip Code</code> column to carry zip codes to the master list.</div>
       <textarea id="acad-raw" placeholder="Paste household export here..."></textarea>
       <button class="btn btn-sm" onclick="parseAcadRaw()"><i class="ti ti-table-import" style="font-size:13px"></i> Parse data</button>
     </div>
@@ -196,6 +196,7 @@ let S = {
   memData: {},
   unsubSet: new Set(),
   acadEmails: [],
+  acadZips: {},        // email -> zip code
   acadSynced: new Set(),
   acadUnsubSet: new Set(),
   authPolling: null
@@ -402,6 +403,8 @@ function parseAcadRaw() {
   const headers = rows[0].map(h => h.trim());
   const p1 = headers.findIndex(h => h.toLowerCase() === 'p1 email');
   const p2 = headers.findIndex(h => h.toLowerCase() === 'p2 email');
+  // ── NEW: find Zip Code column ──
+  const zipCol = headers.findIndex(h => h.toLowerCase() === 'zip code');
 
   if (p1 === -1 && p2 === -1) {
     showStatus('acad-status','Could not find "P1 Email" or "P2 Email" columns. Check your header row.','error');
@@ -409,13 +412,25 @@ function parseAcadRaw() {
   }
 
   const all = new Set();
+  const zipMap = {};  // email -> zip
+
   rows.slice(1).forEach(r => {
-    if (p1 !== -1) { const e=(r[p1]||'').trim().toLowerCase(); if(validEmail(e)) all.add(e); }
-    if (p2 !== -1) { const e=(r[p2]||'').trim().toLowerCase(); if(validEmail(e)) all.add(e); }
+    const zip = zipCol !== -1 ? (r[zipCol] || '').trim() : '';
+    if (p1 !== -1) {
+      const e = (r[p1] || '').trim().toLowerCase();
+      if (validEmail(e)) { all.add(e); if (zip) zipMap[e] = zip; }
+    }
+    if (p2 !== -1) {
+      const e = (r[p2] || '').trim().toLowerCase();
+      if (validEmail(e)) { all.add(e); if (zip) zipMap[e] = zip; }
+    }
   });
 
   S.acadEmails = [...all];
+  S.acadZips = zipMap;  // store for use during sync
+
   const newCount = S.acadEmails.filter(e => !S.acadSynced.has(e)).length;
+  const zipCoverage = Object.keys(zipMap).length;
 
   document.getElementById('acad-metrics').innerHTML = `
     <div class="metric"><div class="val">${S.acadEmails.length}</div><div class="lbl">Unique emails</div></div>
@@ -425,7 +440,9 @@ function parseAcadRaw() {
 
   document.getElementById('acad-unsub-card').style.display = 'block';
   document.getElementById('acad-preview').style.display = 'block';
-  showStatus('acad-status', `Found ${S.acadEmails.length} unique emails. ${newCount} are new this session.`, 'success');
+
+  const zipNote = zipCol !== -1 ? ` Zip codes found for ${zipCoverage} of ${S.acadEmails.length} emails.` : ' No "Zip Code" column found — zip will be left blank.';
+  showStatus('acad-status', `Found ${S.acadEmails.length} unique emails. ${newCount} are new this session.${zipNote}`, 'success');
 }
 
 async function ccImport(listId, contacts, logId) {
@@ -557,7 +574,8 @@ async function runAcademySync() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           statsBefore: S.lastStatsBefore || null,
-          emailsSynced: S.acadEmails  // send ALL emails (including unsubs) so master list is complete
+          emailsSynced: S.acadEmails,   // send ALL emails (including unsubs) so master list is complete
+          zipMap: S.acadZips            // ── NEW: zip codes keyed by email
         })
       });
       const sheetData = await sheetResp.json();
