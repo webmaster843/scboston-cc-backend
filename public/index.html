@@ -276,6 +276,7 @@ let S = {
   acadListId: '',
   memData: {},
   unsubSet: new Set(),
+  unsubByType: {},     // type -> [email, ...] skipped during parse due to unsub
   acadEmails: [],
   acadZips: {},
   acadSynced: new Set(),
@@ -468,11 +469,19 @@ function parseMemRaw() {
     const urows = parseRows(unsub);
     const uh = urows[0].map(h => h.toLowerCase());
     const uec = uh.findIndex(h => h.includes('email'));
-    if (uec !== -1) urows.slice(1).forEach(r => { if (r[uec]) S.unsubSet.add(r[uec].toLowerCase().trim()); });
+    if (uec !== -1) {
+      // Structured export: use the detected email column
+      urows.slice(1).forEach(r => { const e = (r[uec] || '').toLowerCase().trim(); if (e) S.unsubSet.add(e); });
+    } else {
+      // Plain list: skip any non-email header row, grab every line with an @
+      const startIdx = urows[0][0] && !urows[0][0].includes('@') ? 1 : 0;
+      urows.slice(startIdx).forEach(r => { const e = (r[0] || '').toLowerCase().trim(); if (e.includes('@')) S.unsubSet.add(e); });
+    }
   }
 
   const SKIP_COL0 = new Set(['package name', 'memberships by package (detail)', '']);
   const byType = {};
+  const unsubByType = {};
   const seen = new Set();
   let skipped = 0;
   let currentPkgRaw = '';
@@ -520,7 +529,11 @@ function parseMemRaw() {
       const zip = zipMatch ? zipMatch[1] : '';
 
       if (!validEmail(email)) { skipped++; continue; }
-      if (S.unsubSet.has(email)) { skipped++; continue; }
+      if (S.unsubSet.has(email)) {
+        if (!unsubByType[currentPkg]) unsubByType[currentPkg] = [];
+        unsubByType[currentPkg].push(email);
+        skipped++; continue;
+      }
       if (seen.has(email)) continue;
       seen.add(email);
 
@@ -530,6 +543,7 @@ function parseMemRaw() {
   }
 
   S.memData = byType;
+  S.unsubByType = unsubByType;
   const total = Object.values(byType).reduce((s,a) => s+a.length, 0);
   const types = Object.keys(byType).length;
 
@@ -664,23 +678,12 @@ async function runMembershipSync() {
   if (totalPushed > 0) {
     log('mem-log', 'Updating membership sheet...');
     try {
-      // Parse the unsubscribe textarea fresh at sync time so it doesn't depend on parse order
-      const unsubRaw = document.getElementById('mem-unsub').value.trim();
-      const unsubEmailsForSheet = [];
-      if (unsubRaw) {
-        const ulines = unsubRaw.split('\n').filter(l => l.trim());
-        // Skip header row if it contains "email" (not an actual email address)
-        const startIdx = ulines.length > 0 && ulines[0].toLowerCase().includes('email') && !ulines[0].includes('@') ? 1 : 0;
-        ulines.slice(startIdx).forEach(line => {
-          const e = line.replace(/^"|"$/g, '').trim().toLowerCase();
-          if (e && e.includes('@')) unsubEmailsForSheet.push(e);
-        });
-      }
-      log('mem-log', `Flagging ${unsubEmailsForSheet.length} unsubscribed addresses in sheet...`);
+      const totalUnsub = Object.values(S.unsubByType).reduce((s, a) => s + a.length, 0);
+      log('mem-log', `Flagging ${totalUnsub} unsubscribed addresses in sheet...`);
       const sheetResp = await fetch(BACKEND + '/sync-membership-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ membershipData: S.memData, unsubEmails: unsubEmailsForSheet })
+        body: JSON.stringify({ membershipData: S.memData, unsubByType: S.unsubByType })
       });
       const sheetData = await sheetResp.json();
       if (sheetData.success) log('mem-log', 'Membership sheet updated.', 'ok');

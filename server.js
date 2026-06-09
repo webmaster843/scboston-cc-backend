@@ -87,16 +87,14 @@ async function getAcademyListStats(token) {
   }
 }
 
-async function writeToMembershipSheet(membershipData, unsubEmails = []) {
+async function writeToMembershipSheet(membershipData, unsubByType = {}) {
   if (!MEMBERSHIP_SHEET_ID) return;
-  const unsubSet = new Set(unsubEmails.map(e => e.toLowerCase().trim()));
   try {
     const auth = await getGoogleAuth().getClient();
     const sheets = google.sheets({ version: 'v4', auth });
     for (const [type, contacts] of Object.entries(membershipData)) {
       await ensureSheet(sheets, MEMBERSHIP_SHEET_ID, type);
 
-      // Build A:D membership data
       const rows = [
         ['First Name', 'Last Name', 'Email', 'Zip Code'],
         ...contacts.map(c => [c.firstName || '', c.lastName || '', c.email, c.zip || ''])
@@ -108,13 +106,10 @@ async function writeToMembershipSheet(membershipData, unsubEmails = []) {
         requestBody: { values: rows }
       });
 
-      // Build col E: header + any emails from this tab that are in the unsubscribe list
-      const tabEmails = contacts.map(c => (c.email || '').toLowerCase().trim());
-      const flagged = tabEmails.filter(e => e && unsubSet.has(e));
+      const flagged = unsubByType[type] || [];
       const eRows = [['Unsubscribe List'], ...flagged.map(e => [e])];
 
-      // Clear col E fully first, then write fresh data
-      const clearEnd = Math.max(contacts.length + 1, 2);
+      const clearEnd = Math.max(contacts.length + 1, flagged.length + 1, 2);
       await sheets.spreadsheets.values.clear({
         spreadsheetId: MEMBERSHIP_SHEET_ID,
         range: `'${type}'!E1:E${clearEnd}`
@@ -568,8 +563,8 @@ app.post('/import', async (req, res) => {
 
 app.post('/sync-membership-sheet', async (req, res) => {
   try {
-    const { membershipData, unsubEmails = [] } = req.body;
-    await writeToMembershipSheet(membershipData, unsubEmails);
+    const { membershipData, unsubByType = {} } = req.body;
+    await writeToMembershipSheet(membershipData, unsubByType);
     res.json({ success: true });
   } catch(e) {
     res.status(500).json({ error: e.message });
