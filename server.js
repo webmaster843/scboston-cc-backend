@@ -60,13 +60,16 @@ async function getAcademyListStats(token) {
   }
 }
 
-async function writeToMembershipSheet(membershipData) {
+async function writeToMembershipSheet(membershipData, unsubEmails = []) {
   if (!MEMBERSHIP_SHEET_ID) return;
+  const unsubSet = new Set(unsubEmails.map(e => e.toLowerCase().trim()));
   try {
     const auth = await getGoogleAuth().getClient();
     const sheets = google.sheets({ version: 'v4', auth });
     for (const [type, contacts] of Object.entries(membershipData)) {
       await ensureSheet(sheets, MEMBERSHIP_SHEET_ID, type);
+
+      // Build A:D membership data
       const rows = [
         ['First Name', 'Last Name', 'Email', 'Zip Code'],
         ...contacts.map(c => [c.firstName || '', c.lastName || '', c.email, c.zip || ''])
@@ -77,7 +80,26 @@ async function writeToMembershipSheet(membershipData) {
         valueInputOption: 'RAW',
         requestBody: { values: rows }
       });
-      console.log(`Membership sheet updated: ${type} (${contacts.length} rows)`);
+
+      // Build col E: header + any emails from this tab that are in the unsubscribe list
+      const tabEmails = contacts.map(c => (c.email || '').toLowerCase().trim());
+      const flagged = tabEmails.filter(e => e && unsubSet.has(e));
+      const eRows = [['Unsubscribe List'], ...flagged.map(e => [e])];
+
+      // Clear col E fully first, then write fresh data
+      const clearEnd = Math.max(contacts.length + 1, 2);
+      await sheets.spreadsheets.values.clear({
+        spreadsheetId: MEMBERSHIP_SHEET_ID,
+        range: `'${type}'!E1:E${clearEnd}`
+      });
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MEMBERSHIP_SHEET_ID,
+        range: `'${type}'!E1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: eRows }
+      });
+
+      console.log(`Membership sheet updated: ${type} (${contacts.length} rows, ${flagged.length} unsubscribes flagged)`);
     }
   } catch(e) {
     console.error('Membership sheet write error:', e.message);
@@ -391,8 +413,8 @@ app.post('/import', async (req, res) => {
 
 app.post('/sync-membership-sheet', async (req, res) => {
   try {
-    const { membershipData } = req.body;
-    await writeToMembershipSheet(membershipData);
+    const { membershipData, unsubEmails = [] } = req.body;
+    await writeToMembershipSheet(membershipData, unsubEmails);
     res.json({ success: true });
   } catch(e) {
     res.status(500).json({ error: e.message });
