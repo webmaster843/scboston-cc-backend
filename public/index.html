@@ -187,7 +187,7 @@ const DEFAULT_IDS = {
   "Honorary":"afdd7dec-55cf-11f0-8460-fa163ef29647",
   "Club Management":"e9ceaf0a-3736-11f1-b5b9-02420a320002",
   "Skating Academy Management":"6e00b896-3736-11f1-8aff-02420a320002",
-  "Alumni":""
+  "Alumni":"69ce18dc-d119-11f0-94cf-024298282f0f"
 };
 
 let S = {
@@ -581,7 +581,7 @@ async function runMembershipSync() {
       const sheetResp = await fetch(BACKEND + '/sync-membership-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ membershipData: S.memData })
+        body: JSON.stringify({ membershipData: S.memData, unsubEmails: Array.from(S.unsubSet) })
       });
       const sheetData = await sheetResp.json();
       if (sheetData.success) log('mem-log', 'Membership sheet updated.', 'ok');
