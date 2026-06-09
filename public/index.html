@@ -275,8 +275,9 @@ let S = {
   listIds: {...DEFAULT_IDS},
   acadListId: '',
   memData: {},
+  memDataFull: {},     // per-type contacts before unsub filtering (for sync-time cross-reference)
   unsubSet: new Set(),
-  unsubByType: {},     // type -> [email, ...] skipped during parse due to unsub
+  unsubByType: {},
   acadEmails: [],
   acadZips: {},
   acadSynced: new Set(),
@@ -481,7 +482,7 @@ function parseMemRaw() {
 
   const SKIP_COL0 = new Set(['package name', 'memberships by package (detail)', '']);
   const byType = {};
-  const unsubByType = {};
+  const byTypeFull = {};
   const seen = new Set();
   let skipped = 0;
   let currentPkgRaw = '';
@@ -529,13 +530,15 @@ function parseMemRaw() {
       const zip = zipMatch ? zipMatch[1] : '';
 
       if (!validEmail(email)) { skipped++; continue; }
-      if (S.unsubSet.has(email)) {
-        if (!unsubByType[currentPkg]) unsubByType[currentPkg] = [];
-        unsubByType[currentPkg].push(email);
-        skipped++; continue;
-      }
       if (seen.has(email)) continue;
       seen.add(email);
+
+      // Always store in full list (used for sync-time unsub cross-reference)
+      if (!byTypeFull[currentPkg]) byTypeFull[currentPkg] = [];
+      byTypeFull[currentPkg].push({ email, firstName, lastName, pkg: currentPkg, zip });
+
+      // Only add to filtered list if not unsubscribed
+      if (S.unsubSet.has(email)) { skipped++; continue; }
 
       if (!byType[currentPkg]) byType[currentPkg] = [];
       byType[currentPkg].push({ email, firstName, lastName, pkg: currentPkg, zip });
@@ -543,7 +546,7 @@ function parseMemRaw() {
   }
 
   S.memData = byType;
-  S.unsubByType = unsubByType;
+  S.memDataFull = byTypeFull;
   const total = Object.values(byType).reduce((s,a) => s+a.length, 0);
   const types = Object.keys(byType).length;
 
@@ -678,12 +681,32 @@ async function runMembershipSync() {
   if (totalPushed > 0) {
     log('mem-log', 'Updating membership sheet...');
     try {
-      const totalUnsub = Object.values(S.unsubByType).reduce((s, a) => s + a.length, 0);
+      // Build unsub set from textarea at sync time (user may have pasted it after parsing)
+      const unsubRaw = document.getElementById('mem-unsub').value.trim();
+      const syncUnsubSet = new Set();
+      if (unsubRaw) {
+        const urows = parseRows(unsubRaw);
+        const uh = urows[0].map(h => h.toLowerCase());
+        const uec = uh.findIndex(h => h.includes('email'));
+        if (uec !== -1) {
+          urows.slice(1).forEach(r => { const e = (r[uec] || '').toLowerCase().trim(); if (e) syncUnsubSet.add(e); });
+        } else {
+          const startIdx = urows[0][0] && !urows[0][0].includes('@') ? 1 : 0;
+          urows.slice(startIdx).forEach(r => { const e = (r[0] || '').toLowerCase().trim(); if (e.includes('@')) syncUnsubSet.add(e); });
+        }
+      }
+      // Cross-reference against full (unfiltered) contact list per type
+      const unsubByType = {};
+      for (const [type, contacts] of Object.entries(S.memDataFull)) {
+        const flagged = contacts.map(c => c.email).filter(e => syncUnsubSet.has(e));
+        if (flagged.length) unsubByType[type] = flagged;
+      }
+      const totalUnsub = Object.values(unsubByType).reduce((s, a) => s + a.length, 0);
       log('mem-log', `Flagging ${totalUnsub} unsubscribed addresses in sheet...`);
       const sheetResp = await fetch(BACKEND + '/sync-membership-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ membershipData: S.memData, unsubByType: S.unsubByType })
+        body: JSON.stringify({ membershipData: S.memData, unsubByType })
       });
       const sheetData = await sheetResp.json();
       if (sheetData.success) log('mem-log', 'Membership sheet updated.', 'ok');
