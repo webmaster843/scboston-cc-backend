@@ -578,10 +578,23 @@ async function runMembershipSync() {
   if (totalPushed > 0) {
     log('mem-log', 'Updating membership sheet...');
     try {
+      // Parse the unsubscribe textarea fresh at sync time so it doesn't depend on parse order
+      const unsubRaw = document.getElementById('mem-unsub').value.trim();
+      const unsubEmailsForSheet = [];
+      if (unsubRaw) {
+        const ulines = unsubRaw.split('\n').filter(l => l.trim());
+        // Skip header row if it contains "email" (not an actual email address)
+        const startIdx = ulines.length > 0 && ulines[0].toLowerCase().includes('email') && !ulines[0].includes('@') ? 1 : 0;
+        ulines.slice(startIdx).forEach(line => {
+          const e = line.replace(/^"|"$/g, '').trim().toLowerCase();
+          if (e && e.includes('@')) unsubEmailsForSheet.push(e);
+        });
+      }
+      log('mem-log', `Flagging ${unsubEmailsForSheet.length} unsubscribed addresses in sheet...`);
       const sheetResp = await fetch(BACKEND + '/sync-membership-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ membershipData: S.memData, unsubEmails: Array.from(S.unsubSet) })
+        body: JSON.stringify({ membershipData: S.memData, unsubEmails: unsubEmailsForSheet })
       });
       const sheetData = await sheetResp.json();
       if (sheetData.success) log('mem-log', 'Membership sheet updated.', 'ok');
