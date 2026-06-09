@@ -348,6 +348,7 @@ function parseMemRaw() {
   const emailCol = headers.findIndex(h => h.includes('email'));
   const nameCol  = headers.findIndex(h => h.includes('customer') || h.includes('name'));
   const pkgCol   = headers.findIndex(h => h.includes('package'));
+  const zipCol   = headers.findIndex(h => h.toLowerCase() === 'zip code');
 
   if (emailCol === -1) { showStatus('mem-status','No email column found. Check headers include "email".','error'); return; }
 
@@ -372,8 +373,9 @@ function parseMemRaw() {
     if (seen.has(email)) return;
     seen.add(email);
     const nameParts = nameCol !== -1 ? (r[nameCol] || '').split(',').map(s => s.trim()) : ['',''];
+    const zip = zipCol !== -1 ? (r[zipCol] || '').trim() : '';
     if (!byType[pkg]) byType[pkg] = [];
-    byType[pkg].push({ email, firstName: nameParts[1]||'', lastName: nameParts[0]||'', pkg });
+    byType[pkg].push({ email, firstName: nameParts[1]||'', lastName: nameParts[0]||'', pkg, zip });
   });
 
   S.memData = byType;
