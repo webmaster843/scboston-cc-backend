@@ -68,8 +68,8 @@ async function writeToMembershipSheet(membershipData) {
     for (const [type, contacts] of Object.entries(membershipData)) {
       await ensureSheet(sheets, MEMBERSHIP_SHEET_ID, type);
       const rows = [
-        ['First Name', 'Last Name', 'Email'],
-        ...contacts.map(c => [c.firstName || '', c.lastName || '', c.email])
+        ['First Name', 'Last Name', 'Email', 'Zip Code'],
+        ...contacts.map(c => [c.firstName || '', c.lastName || '', c.email, c.zip || ''])
       ];
       await sheets.spreadsheets.values.update({
         spreadsheetId: MEMBERSHIP_SHEET_ID,
