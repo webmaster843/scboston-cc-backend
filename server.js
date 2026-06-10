@@ -17,6 +17,34 @@ const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID;
 const MEMBERSHIP_SHEET_ID = process.env.MEMBERSHIP_SHEET_ID;
 const ACADEMY_SHEET_ID = process.env.ACADEMY_SHEET_ID;
 const ACADEMY_LIST_ID = '132ca7fe-47cb-11f1-bdf1-02420a320003';
+const PROGRAMS_SHEET_ID = process.env.PROGRAMS_SHEET_ID;
+
+// Extensible subcategory config — add new entries here without touching any other code
+const PROGRAMS_SUBCATEGORIES = {
+  "Programs": [
+    "Hockey Power Skating",
+    "Theatrical Skating",
+    "Synchronized Skating",
+    "Adult Skating",
+  ],
+  "Shows": [
+    "A Night of Stars",
+    "Ice Chips",
+    "Summer Sizzler",
+    "Stars on Ice",
+    "Meet and Greet Type Opportunities",
+  ],
+  "Singles / Pairs / Ice Dance": [
+    "2016 Worlds",
+    "2022 Skate America",
+    "2025 Worlds",
+    "Qualifying and Non-Qualifying Events",
+  ],
+  "Other": [
+    "General Interest List",
+    "Hospitality List",
+  ],
+};
 
 let storedTokens = {
   access_token: '',
@@ -282,6 +310,128 @@ async function writeToAcademySheet(statsBefore, statsAfter, emailsSynced, unsubS
   }
 }
 
+// Queries CC for unsubscribed contacts in a specific list and removes them via bulk activity
+async function removeUnsubsFromList(token, listId) {
+  const contactIds = [];
+  let cursor = null;
+  let page = 0;
+  try {
+    do {
+      const url = cursor
+        ? `https://api.cc.email/v3/contacts?status=unsubscribed&lists=${listId}&limit=500&cursor=${cursor}`
+        : `https://api.cc.email/v3/contacts?status=unsubscribed&lists=${listId}&limit=500`;
+      const resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+      const data = await resp.json();
+      (data.contacts || []).forEach(c => { if (c.contact_id) contactIds.push(c.contact_id); });
+      cursor = data._links && data._links.next
+        ? new URL('https://api.cc.email' + data._links.next.href).searchParams.get('cursor')
+        : null;
+      page++;
+    } while (cursor && page < 50);
+  } catch(e) {
+    console.error('removeUnsubsFromList fetch error:', e.message);
+    return 0;
+  }
+  if (contactIds.length === 0) return 0;
+  try {
+    for (let i = 0; i < contactIds.length; i += 500) {
+      const batch = contactIds.slice(i, i + 500);
+      await fetch('https://api.cc.email/v3/activities/remove_list_memberships', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: { contact_ids: batch }, list_ids: [listId] })
+      });
+    }
+    console.log(`Removed ${contactIds.length} unsubscribed contacts from list ${listId}`);
+  } catch(e) {
+    console.error('removeUnsubsFromList remove error:', e.message);
+  }
+  return contactIds.length;
+}
+
+async function writeToProgramsSheet(subcategory, contacts, unsubSet) {
+  if (!PROGRAMS_SHEET_ID) return { added: 0, removed: 0, total: 0 };
+  const auth = await getGoogleAuth().getClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+  const today = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+
+  await ensureSheet(sheets, PROGRAMS_SHEET_ID, subcategory);
+
+  // Read existing rows
+  const existing = await sheets.spreadsheets.values.get({
+    spreadsheetId: PROGRAMS_SHEET_ID,
+    range: `'${subcategory}'!A:D`
+  });
+  const rows = existing.data.values || [];
+  const hasHeader = rows.length > 0 && rows[0][0] === 'Email';
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+
+  // Build map: email -> row (preserves existing name/zip data)
+  const emailMap = new Map();
+  dataRows.forEach(r => {
+    const email = (r[0] || '').toLowerCase().trim();
+    if (email) emailMap.set(email, [...r]);
+  });
+
+  // Merge new contacts (skip existing, skip unsubscribed)
+  let added = 0;
+  contacts.forEach(c => {
+    const key = c.email.toLowerCase().trim();
+    if (unsubSet.has(key)) return;
+    if (!emailMap.has(key)) {
+      emailMap.set(key, [c.email, c.firstName || '', c.lastName || '', c.zip || '']);
+      added++;
+    }
+  });
+
+  // Remove unsubscribed rows
+  let removed = 0;
+  for (const key of [...emailMap.keys()]) {
+    if (unsubSet.has(key)) { emailMap.delete(key); removed++; }
+  }
+
+  const outputRows = [
+    ['Email', 'First Name', 'Last Name', 'Zip Code'],
+    ...Array.from(emailMap.values()).map(r => [r[0]||'', r[1]||'', r[2]||'', r[3]||''])
+  ];
+
+  // Clear then rewrite to handle shrinking lists
+  await sheets.spreadsheets.values.clear({ spreadsheetId: PROGRAMS_SHEET_ID, range: `'${subcategory}'!A:D` });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: PROGRAMS_SHEET_ID,
+    range: `'${subcategory}'!A1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: outputRows }
+  });
+
+  // Update Programs Sync Log (one row per subcategory, upsert by name)
+  await ensureSheet(sheets, PROGRAMS_SHEET_ID, 'Programs Sync Log');
+  const logExisting = await sheets.spreadsheets.values.get({
+    spreadsheetId: PROGRAMS_SHEET_ID,
+    range: "'Programs Sync Log'!A:C"
+  });
+  const logRows = logExisting.data.values || [];
+  const logHasHeader = logRows.length > 0 && logRows[0][0] === 'Subcategory';
+  const logMap = new Map();
+  (logHasHeader ? logRows.slice(1) : logRows).forEach(r => { if (r[0]) logMap.set(r[0], r); });
+  logMap.set(subcategory, [subcategory, today, outputRows.length - 1]);
+  const logOutput = [
+    ['Subcategory', 'Last Synced', 'Total Contacts'],
+    ...Array.from(logMap.values())
+  ];
+  await sheets.spreadsheets.values.clear({ spreadsheetId: PROGRAMS_SHEET_ID, range: "'Programs Sync Log'!A:C" });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: PROGRAMS_SHEET_ID,
+    range: "'Programs Sync Log'!A1",
+    valueInputOption: 'RAW',
+    requestBody: { values: logOutput }
+  });
+
+  const total = outputRows.length - 1;
+  console.log(`Programs sheet "${subcategory}" updated: ${added} added, ${removed} unsubscribers removed, ${total} total`);
+  return { added, removed, total };
+}
+
 async function saveRefreshToken(token) {
   if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
   try {
@@ -465,6 +615,44 @@ app.post('/sync-academy-sheet', async (req, res) => {
     const masterStats = await writeToAcademySheet(statsBefore, statsAfter, emailsSynced || [], unsubSet, bounceSet, sheets, zipMap || {});
     res.json({ success: true, statsBefore, statsAfter, trueNew: statsAfter.active - statsBefore.active, masterStats });
   } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// CC unsubscribes only (no bounce list) — used by Programs/Events tab
+app.get('/cc-unsubscribes', async (req, res) => {
+  try {
+    const token = await getValidToken();
+    const emails = await fetchAllUnsubscribes(token);
+    res.json({ emails: Array.from(emails), count: emails.size });
+  } catch(e) {
+    console.error('cc-unsubscribes error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/programs-config', (req, res) => {
+  res.json({ subcategories: PROGRAMS_SUBCATEGORIES });
+});
+
+app.post('/sync-programs-sheet', async (req, res) => {
+  try {
+    const { subcategory, contacts, listId } = req.body;
+    if (!subcategory) return res.status(400).json({ error: 'subcategory required' });
+
+    const token = await getValidToken();
+    const unsubSet = await fetchAllUnsubscribes(token);
+
+    // Best-effort: remove unsubscribed contacts from the CC list
+    let removedFromCC = 0;
+    if (listId) {
+      removedFromCC = await removeUnsubsFromList(token, listId);
+    }
+
+    const stats = await writeToProgramsSheet(subcategory, contacts || [], unsubSet);
+    res.json({ success: true, ...stats, removedFromCC });
+  } catch(e) {
+    console.error('sync-programs-sheet error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });

@@ -72,6 +72,7 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
     <div class="tab active" onclick="switchTab('settings', event)"><i class="ti ti-settings" style="font-size:15px"></i> Settings</div>
     <div class="tab" onclick="switchTab('membership', event)"><i class="ti ti-users" style="font-size:15px"></i> Membership sync</div>
     <div class="tab" onclick="switchTab('academy', event)"><i class="ti ti-star" style="font-size:15px"></i> Academy sync</div>
+    <div class="tab" onclick="switchTab('programs', event)"><i class="ti ti-calendar-event" style="font-size:15px"></i> Programs/Events sync</div>
   </div>
 
   <!-- SETTINGS -->
@@ -107,6 +108,14 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
       <input type="text" id="acad-list-id" value="132ca7fe-47cb-11f1-bdf1-02420a320003">
       <button class="btn btn-sm" onclick="saveAcadId()"><i class="ti ti-device-floppy" style="font-size:13px"></i> Save</button>
       <span class="saved-badge" id="acadid-saved"><i class="ti ti-check"></i> Saved</span>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Programs / Events list IDs</div>
+      <div style="font-size:12px;color:#666;margin-bottom:12px">One Constant Contact list ID per subcategory. Create the lists in CC first, then paste their IDs here.</div>
+      <div id="prog-list-ids-grid"></div>
+      <button class="btn btn-sm" onclick="saveProgListIds()"><i class="ti ti-device-floppy" style="font-size:13px"></i> Save list IDs</button>
+      <span class="saved-badge" id="progids-saved"><i class="ti ti-check"></i> Saved</span>
     </div>
 
   </div>
@@ -170,6 +179,51 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
     <div class="log" id="acad-log"></div>
   </div>
 
+
+  <!-- PROGRAMS / EVENTS SYNC -->
+  <div class="panel" id="panel-programs">
+    <div id="prog-status" class="status"></div>
+
+    <div class="card">
+      <div class="section-title">Step 1 — Select subcategory</div>
+      <label for="prog-subcategory">Subcategory</label>
+      <select id="prog-subcategory" onchange="onProgSubcategoryChange()"></select>
+      <div id="prog-listid-hint" class="hint" style="margin-bottom:0"></div>
+    </div>
+
+    <div class="card">
+      <div class="section-title">Step 2 — Upload contacts</div>
+      <div class="hint" style="margin-bottom:8px">Paste a CSV or tab-separated export. Source will be auto-detected (ActiveNet, AudienceView, or manual spreadsheet).</div>
+      <textarea id="prog-raw" placeholder="Paste export here..."></textarea>
+      <button class="btn btn-sm" onclick="parseProgRaw()"><i class="ti ti-table-import" style="font-size:13px"></i> Parse data</button>
+    </div>
+
+    <div class="card" id="prog-detection-card" style="display:none">
+      <div class="section-title">Source detection</div>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <div style="font-size:13px">Detected: <strong id="prog-detected-source">—</strong></div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <label style="margin:0;white-space:nowrap">Override:</label>
+          <select id="prog-source-override" onchange="onSourceOverride()" style="margin-bottom:0;width:auto">
+            <option value="activenet">ActiveNet export</option>
+            <option value="audienceview">AudienceView export</option>
+            <option value="manual">Manual spreadsheet</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div id="prog-preview" style="display:none;margin-bottom:1rem">
+      <div class="metrics" id="prog-metrics"></div>
+    </div>
+
+    <div class="btn-group">
+      <button class="btn btn-primary" onclick="runProgramsSync()"><i class="ti ti-refresh" style="font-size:13px"></i> Sync to Constant Contact</button>
+      <button class="btn" onclick="exportProgramsCSV()"><i class="ti ti-download" style="font-size:13px"></i> Download CSV</button>
+    </div>
+    <div class="log" id="prog-log"></div>
+  </div>
+
 </div>
 
 <script>
@@ -190,6 +244,33 @@ const DEFAULT_IDS = {
   "Alumni":"69ce18dc-d119-11f0-94cf-024298282f0f"
 };
 
+// Programs/Events subcategory config — mirrors server.js PROGRAMS_SUBCATEGORIES
+const PROG_SUBCATEGORIES = {
+  "Programs": [
+    "Hockey Power Skating",
+    "Theatrical Skating",
+    "Synchronized Skating",
+    "Adult Skating",
+  ],
+  "Shows": [
+    "A Night of Stars",
+    "Ice Chips",
+    "Summer Sizzler",
+    "Stars on Ice",
+    "Meet and Greet Type Opportunities",
+  ],
+  "Singles / Pairs / Ice Dance": [
+    "2016 Worlds",
+    "2022 Skate America",
+    "2025 Worlds",
+    "Qualifying and Non-Qualifying Events",
+  ],
+  "Other": [
+    "General Interest List",
+    "Hospitality List",
+  ],
+};
+
 let S = {
   lastStatsBefore: null,
   listIds: {...DEFAULT_IDS},
@@ -197,10 +278,16 @@ let S = {
   memData: {},
   unsubSet: new Set(),
   acadEmails: [],
-  acadZips: {},        // email -> zip code
+  acadZips: {},
   acadSynced: new Set(),
   acadUnsubSet: new Set(),
-  authPolling: null
+  authPolling: null,
+  // Programs/Events state
+  progListIds: {},
+  progData: [],
+  progSubcategory: '',
+  progSource: '',
+  progParsedRows: null,
 };
 
 // ─── AUTH STATUS ───────────────────────────────────────────────
@@ -695,7 +782,236 @@ function exportAcademyCSV() {
   a.click();
 }
 
+// ─── PROGRAMS / EVENTS SYNC ───────────────────────────────────
+
+function buildProgramsListIdsGrid() {
+  const grid = document.getElementById('prog-list-ids-grid');
+  if (!grid) return;
+  grid.innerHTML = Object.entries(PROG_SUBCATEGORIES).map(([group, subs]) => `
+    <div style="margin-bottom:14px">
+      <div style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">${group}</div>
+      ${subs.map(sub => `
+        <div class="list-id-row">
+          <span>${sub}</span>
+          <input type="text" id="plid_${sub.replace(/\W+/g,'_')}" value="${S.progListIds[sub]||''}" placeholder="List ID">
+        </div>`).join('')}
+    </div>`).join('');
+}
+
+function saveProgListIds() {
+  Object.values(PROG_SUBCATEGORIES).flat().forEach(sub => {
+    const el = document.getElementById('plid_' + sub.replace(/\W+/g,'_'));
+    if (el) S.progListIds[sub] = el.value.trim();
+  });
+  document.getElementById('progids-saved').style.display = 'inline';
+}
+
+function buildProgSubcategorySelect() {
+  const sel = document.getElementById('prog-subcategory');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">— Select subcategory —</option>' +
+    Object.entries(PROG_SUBCATEGORIES).map(([group, subs]) =>
+      `<optgroup label="${group}">${subs.map(s => `<option value="${s}">${s}</option>`).join('')}</optgroup>`
+    ).join('');
+}
+
+function onProgSubcategoryChange() {
+  const sub = document.getElementById('prog-subcategory').value;
+  S.progSubcategory = sub;
+  const hint = document.getElementById('prog-listid-hint');
+  if (!sub) { hint.textContent = ''; return; }
+  const lid = S.progListIds[sub];
+  hint.textContent = lid ? `CC list ID: ${lid}` : 'No list ID configured — add it in the Settings tab before syncing.';
+  hint.style.color = lid ? '#999' : '#8a6200';
+}
+
+function detectSource(headers) {
+  const h = headers.map(x => x.toLowerCase().trim());
+  if (h.some(x => x.includes('p1') || x.includes('p2'))) return 'activenet';
+  const hasEmail = h.some(x => x === 'email' || x.includes('email address') || x.includes('e-mail'));
+  const hasZip = h.some(x => x.includes('zip') || x.includes('postal'));
+  if (hasEmail && hasZip) return 'audienceview';
+  if (hasEmail) return 'manual';
+  return 'unknown';
+}
+
+function parseForSource(rows, source) {
+  const headers = rows[0].map(h => h.trim());
+  const h = headers.map(x => x.toLowerCase().trim());
+  const data = rows.slice(1);
+  const contacts = [];
+  const seen = new Set();
+
+  function findCol(...terms) {
+    return h.findIndex(x => terms.some(t => x === t || x.includes(t)));
+  }
+
+  if (source === 'activenet') {
+    const p1 = findCol('p1 email', 'p1email');
+    const p2 = findCol('p2 email', 'p2email');
+    const zipCol = findCol('zip code', 'zip', 'postal');
+    data.forEach(r => {
+      const zip = zipCol !== -1 ? (r[zipCol] || '').trim().replace(/^(\d{5}).*/, '$1') : '';
+      [p1, p2].forEach(col => {
+        if (col === -1) return;
+        const email = (r[col] || '').trim().toLowerCase();
+        if (validEmail(email) && !seen.has(email)) {
+          seen.add(email); contacts.push({ email, firstName: '', lastName: '', zip });
+        }
+      });
+    });
+  } else {
+    // AudienceView and Manual share the same flexible column detection
+    const emailCol = findCol('email', 'email address', 'e-mail');
+    const firstCol = findCol('first name', 'firstname', 'first');
+    const lastCol  = findCol('last name',  'lastname',  'last');
+    const nameCol  = findCol('full name', 'name');
+    const zipCol   = findCol('zip code', 'zip', 'postal code', 'postal');
+    if (emailCol === -1) return contacts;
+    data.forEach(r => {
+      const email = (r[emailCol] || '').trim().toLowerCase();
+      if (!validEmail(email) || seen.has(email)) return;
+      seen.add(email);
+      let firstName = firstCol !== -1 ? (r[firstCol] || '').trim() : '';
+      let lastName  = lastCol  !== -1 ? (r[lastCol]  || '').trim() : '';
+      if (!firstName && !lastName && nameCol !== -1) {
+        const parts = (r[nameCol] || '').trim().split(/\s+/);
+        firstName = parts[0] || ''; lastName = parts.slice(1).join(' ') || '';
+      }
+      const zip = zipCol !== -1 ? (r[zipCol] || '').trim().replace(/^(\d{5}).*/, '$1') : '';
+      contacts.push({ email, firstName, lastName, zip });
+    });
+  }
+  return contacts;
+}
+
+function parseProgRaw() {
+  if (!S.progSubcategory) { showStatus('prog-status', 'Select a subcategory first.', 'warning'); return; }
+  const raw = document.getElementById('prog-raw').value;
+  if (!raw.trim()) { showStatus('prog-status', 'Paste your export data first.', 'warning'); return; }
+
+  const rows = parseRows(raw);
+  if (rows.length < 2) { showStatus('prog-status', 'Not enough data found. Check your paste.', 'error'); return; }
+
+  S.progParsedRows = rows;
+  const headers = rows[0].map(h => h.trim());
+  const detected = detectSource(headers);
+  const resolved = detected === 'unknown' ? 'manual' : detected;
+
+  const sourceLabels = { activenet: 'ActiveNet export', audienceview: 'AudienceView export', manual: 'Manual spreadsheet' };
+  document.getElementById('prog-detected-source').textContent =
+    detected === 'unknown' ? 'Unknown — defaulting to Manual' : sourceLabels[detected];
+  document.getElementById('prog-source-override').value = resolved;
+  document.getElementById('prog-detection-card').style.display = 'block';
+
+  applyProgParse(resolved);
+}
+
+function onSourceOverride() {
+  if (!S.progParsedRows) return;
+  applyProgParse(document.getElementById('prog-source-override').value);
+}
+
+function applyProgParse(source) {
+  S.progSource = source;
+  S.progData = parseForSource(S.progParsedRows, source);
+
+  if (!S.progData.length) {
+    showStatus('prog-status', `No valid emails found using "${source}" format. Try a different source type.`, 'error');
+    document.getElementById('prog-preview').style.display = 'none';
+    return;
+  }
+
+  const zipCount = S.progData.filter(c => c.zip).length;
+  document.getElementById('prog-metrics').innerHTML = `
+    <div class="metric"><div class="val">${S.progData.length}</div><div class="lbl">Valid contacts</div></div>
+    <div class="metric"><div class="val">${zipCount}</div><div class="lbl">With zip code</div></div>
+    <div class="metric"><div class="val">—</div><div class="lbl">Suppressed (checked on sync)</div></div>`;
+  document.getElementById('prog-preview').style.display = 'block';
+  showStatus('prog-status', `Parsed ${S.progData.length} contacts (${zipCount} with zip codes). Ready to sync to "${S.progSubcategory}".`, 'success');
+}
+
+async function runProgramsSync() {
+  if (!S.progSubcategory) { showStatus('prog-status', 'Select a subcategory first.', 'warning'); return; }
+  if (!S.progData.length) { showStatus('prog-status', 'Parse your data first.', 'warning'); return; }
+
+  const listId = S.progListIds[S.progSubcategory] || '';
+  if (!listId) {
+    showStatus('prog-status', `No CC list ID for "${S.progSubcategory}". Add it in the Settings tab.`, 'error');
+    return;
+  }
+
+  const logEl = document.getElementById('prog-log');
+  logEl.innerHTML = ''; logEl.classList.add('show');
+
+  // Step 1: Fetch CC unsubscribes (no bounce list for this tab)
+  showStatus('prog-status', 'Fetching unsubscribed emails from Constant Contact...', 'info');
+  log('prog-log', 'Fetching unsubscribe list from CC...');
+  let unsubSet = new Set();
+  try {
+    const unsubResp = await fetch(BACKEND + '/cc-unsubscribes');
+    const unsubData = await unsubResp.json();
+    unsubSet = new Set(unsubData.emails || []);
+    log('prog-log', `${unsubSet.size} unsubscribed emails loaded from CC.`, 'ok');
+  } catch(e) {
+    log('prog-log', 'Could not fetch unsubscribes: ' + e.message + ' — proceeding without suppression.', 'warn');
+  }
+
+  // Step 2: Filter suppressed contacts (CC import gets email + name only, no zip)
+  const filtered = S.progData.filter(c => !unsubSet.has(c.email.toLowerCase()));
+  const suppressed = S.progData.length - filtered.length;
+  if (!filtered.length) {
+    showStatus('prog-status', 'All contacts are unsubscribed — nothing to sync.', 'warning');
+    return;
+  }
+
+  // Step 3: Import to Constant Contact
+  showStatus('prog-status', `Syncing ${filtered.length} contacts to Constant Contact...`, 'info');
+  const pushed = await ccImport(listId, filtered, 'prog-log');
+
+  if (pushed > 0) {
+    // Step 4: Sync Google Sheet (includes zip, deduplicate, remove unsubscribers)
+    log('prog-log', 'Updating Google Sheet...');
+    try {
+      const sheetResp = await fetch(BACKEND + '/sync-programs-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subcategory: S.progSubcategory, contacts: S.progData, listId })
+      });
+      const sheetData = await sheetResp.json();
+      if (sheetData.success) {
+        log('prog-log', `Sheet updated — ${sheetData.added} new, ${sheetData.removed} unsubscribers removed, ${sheetData.total} total active.`, 'ok');
+        if (sheetData.removedFromCC > 0) {
+          log('prog-log', `Removed ${sheetData.removedFromCC} unsubscribers from CC list.`, 'ok');
+        }
+      } else {
+        log('prog-log', 'Sheet update failed: ' + JSON.stringify(sheetData), 'warn');
+      }
+    } catch(e) {
+      log('prog-log', 'Sheet update error: ' + e.message, 'warn');
+    }
+    showStatus('prog-status',
+      `Sync complete. ${pushed} contacts pushed to CC. ${suppressed ? suppressed + ' suppressed (unsubscribed). ' : ''}Sheet updated.`,
+      'success');
+  } else {
+    showStatus('prog-status', 'No contacts were pushed. Check the log below for details.', 'error');
+  }
+}
+
+function exportProgramsCSV() {
+  if (!S.progData.length) { showStatus('prog-status', 'Parse data first.', 'warning'); return; }
+  const sub = S.progSubcategory || 'programs_export';
+  const csv = 'Email,First Name,Last Name,Zip Code\n' +
+    S.progData.map(c => `${c.email},${c.firstName||''},${c.lastName||''},${c.zip||''}`).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = sub.replace(/[^a-z0-9]/gi, '_') + '.csv';
+  a.click();
+}
+
 buildListIdsGrid();
+buildProgramsListIdsGrid();
+buildProgSubcategorySelect();
 S.acadListId = '132ca7fe-47cb-11f1-bdf1-02420a320003';
 checkAuthStatus();
 </script>
