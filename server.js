@@ -33,7 +33,7 @@ const PROGRAMS_SUBCATEGORIES = {
     "Stars on Ice",
     "Meet and Greet Type Opportunities",
   ],
-  "Singles / Pairs / Ice Dance": [
+  "Singles / Pairs / Ice Dance / Synchronized Skating": [
     "Synchronized Skating",
     "2016 Worlds",
     "2022 Skate America",
