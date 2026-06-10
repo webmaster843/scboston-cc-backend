@@ -249,7 +249,6 @@ const PROG_SUBCATEGORIES = {
   "Programs": [
     "Hockey Power Skating",
     "Theatrical Skating",
-    "Synchronized Skating",
     "Adult Skating",
   ],
   "Shows": [
@@ -260,6 +259,7 @@ const PROG_SUBCATEGORIES = {
     "Meet and Greet Type Opportunities",
   ],
   "Singles / Pairs / Ice Dance": [
+    "Synchronized Skating",
     "2016 Worlds",
     "2022 Skate America",
     "2025 Worlds",
@@ -784,6 +784,13 @@ function exportAcademyCSV() {
 
 // ─── PROGRAMS / EVENTS SYNC ───────────────────────────────────
 
+function loadProgListIds() {
+  try {
+    const stored = localStorage.getItem('progListIds');
+    if (stored) S.progListIds = JSON.parse(stored);
+  } catch(e) {}
+}
+
 function buildProgramsListIdsGrid() {
   const grid = document.getElementById('prog-list-ids-grid');
   if (!grid) return;
@@ -803,7 +810,10 @@ function saveProgListIds() {
     const el = document.getElementById('plid_' + sub.replace(/\W+/g,'_'));
     if (el) S.progListIds[sub] = el.value.trim();
   });
+  try { localStorage.setItem('progListIds', JSON.stringify(S.progListIds)); } catch(e) {}
   document.getElementById('progids-saved').style.display = 'inline';
+  // Refresh the subcategory hint if one is selected
+  onProgSubcategoryChange();
 }
 
 function buildProgSubcategorySelect() {
@@ -1010,6 +1020,7 @@ function exportProgramsCSV() {
 }
 
 buildListIdsGrid();
+loadProgListIds();
 buildProgramsListIdsGrid();
 buildProgSubcategorySelect();
 S.acadListId = '132ca7fe-47cb-11f1-bdf1-02420a320003';

@@ -24,7 +24,6 @@ const PROGRAMS_SUBCATEGORIES = {
   "Programs": [
     "Hockey Power Skating",
     "Theatrical Skating",
-    "Synchronized Skating",
     "Adult Skating",
   ],
   "Shows": [
@@ -35,6 +34,7 @@ const PROGRAMS_SUBCATEGORIES = {
     "Meet and Greet Type Opportunities",
   ],
   "Singles / Pairs / Ice Dance": [
+    "Synchronized Skating",
     "2016 Worlds",
     "2022 Skate America",
     "2025 Worlds",
