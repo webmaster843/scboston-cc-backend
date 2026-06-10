@@ -373,12 +373,18 @@ async function writeToProgramsSheet(subcategory, contacts, unsubSet) {
     if (email) emailMap.set(email, [...r]);
   });
 
-  // Merge new contacts (skip existing, skip unsubscribed)
+  // Merge new contacts — add if new, enrich if existing row is missing name/zip
   let added = 0;
   contacts.forEach(c => {
     const key = c.email.toLowerCase().trim();
     if (unsubSet.has(key)) return;
-    if (!emailMap.has(key)) {
+    if (emailMap.has(key)) {
+      const row = emailMap.get(key);
+      if (!row[1] && c.firstName) row[1] = c.firstName;
+      if (!row[2] && c.lastName)  row[2] = c.lastName;
+      if (!row[3] && c.zip)       row[3] = c.zip;
+      emailMap.set(key, row);
+    } else {
       emailMap.set(key, [c.email, c.firstName || '', c.lastName || '', c.zip || '']);
       added++;
     }
