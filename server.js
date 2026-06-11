@@ -35,9 +35,8 @@ const PROGRAMS_SUBCATEGORIES = {
   ],
   "Singles / Pairs / Ice Dance / Synchronized Skating": [
     "Synchronized Skating",
-    "2016 Worlds",
+    "World Championships ('16, '25)",
     "2022 Skate America",
-    "2025 Worlds",
     "Qualifying and Non-Qualifying Events",
   ],
   "Other": [
