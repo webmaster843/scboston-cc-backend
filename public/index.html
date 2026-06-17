@@ -280,6 +280,7 @@ let S = {
   unsubByType: {},
   acadEmails: [],
   acadZips: {},
+  acadEnrolledSet: new Set(), // emails where Registration Status === 'Registered'
   acadSynced: new Set(),
   acadUnsubSet: new Set(),
   authPolling: null,
@@ -573,8 +574,8 @@ function parseAcadRaw() {
   const headers = rows[0].map(h => h.trim());
   const p1 = headers.findIndex(h => h.toLowerCase() === 'p1 email');
   const p2 = headers.findIndex(h => h.toLowerCase() === 'p2 email');
-  // ── NEW: find Zip Code column ──
   const zipCol = headers.findIndex(h => h.toLowerCase() === 'zip code');
+  const regCol = headers.findIndex(h => h.toLowerCase() === 'registration status');
 
   if (p1 === -1 && p2 === -1) {
     showStatus('acad-status','Could not find "P1 Email" or "P2 Email" columns. Check your header row.','error');
@@ -582,22 +583,27 @@ function parseAcadRaw() {
   }
 
   const all = new Set();
-  const zipMap = {};  // email -> zip
+  const zipMap = {};    // email -> zip
+  const enrolledSet = new Set(); // emails where Registration Status === 'Registered'
+  let enrolledHouseholds = 0;   // one per row, not per email
 
   rows.slice(1).forEach(r => {
     const zip = zipCol !== -1 ? (r[zipCol] || '').trim() : '';
-    if (p1 !== -1) {
-      const e = (r[p1] || '').trim().toLowerCase();
-      if (validEmail(e)) { all.add(e); if (zip) zipMap[e] = zip; }
-    }
-    if (p2 !== -1) {
-      const e = (r[p2] || '').trim().toLowerCase();
-      if (validEmail(e)) { all.add(e); if (zip) zipMap[e] = zip; }
-    }
+    const isRegistered = regCol !== -1 && (r[regCol] || '').trim().toLowerCase() === 'registered';
+    if (isRegistered) enrolledHouseholds++;
+    [p1, p2].forEach(col => {
+      if (col === -1) return;
+      const e = (r[col] || '').trim().toLowerCase();
+      if (!validEmail(e)) return;
+      all.add(e);
+      if (zip) zipMap[e] = zip;
+      if (isRegistered) enrolledSet.add(e);
+    });
   });
 
   S.acadEmails = [...all];
-  S.acadZips = zipMap;  // store for use during sync
+  S.acadZips = zipMap;
+  S.acadEnrolledSet = enrolledSet;
 
   const newCount = S.acadEmails.filter(e => !S.acadSynced.has(e)).length;
   const zipCoverage = Object.keys(zipMap).length;
@@ -606,13 +612,15 @@ function parseAcadRaw() {
     <div class="metric"><div class="val">${S.acadEmails.length}</div><div class="lbl">Unique emails</div></div>
     <div class="metric"><div class="val">${S.acadSynced.size}</div><div class="lbl">Already synced</div></div>
     <div class="metric"><div class="val">${newCount}</div><div class="lbl">New to push</div></div>
+    ${regCol !== -1 ? `<div class="metric"><div class="val">${enrolledHouseholds}</div><div class="lbl">Currently enrolled</div></div>` : ''}
     <div class="metric" id="acad-unsub-metric" style="display:none"><div class="val" id="acad-unsub-val">—</div><div class="lbl">Suppressed (unsub)</div></div>`;
 
   document.getElementById('acad-unsub-card').style.display = 'block';
   document.getElementById('acad-preview').style.display = 'block';
 
   const zipNote = zipCol !== -1 ? ` Zip codes found for ${zipCoverage} of ${S.acadEmails.length} emails.` : ' No "Zip Code" column found — zip will be left blank.';
-  showStatus('acad-status', `Found ${S.acadEmails.length} unique emails. ${newCount} are new this session.${zipNote}`, 'success');
+  const enrollNote = regCol !== -1 ? ` ${enrolledHouseholds} households currently enrolled.` : ' No "Registration Status" column found — enrollment will not be tracked.';
+  showStatus('acad-status', `Found ${S.acadEmails.length} unique emails. ${newCount} are new this session.${zipNote}${enrollNote}`, 'success');
 }
 
 async function ccImport(listId, contacts, logId) {
@@ -766,8 +774,9 @@ async function runAcademySync() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           statsBefore: S.lastStatsBefore || null,
-          emailsSynced: S.acadEmails,   // send ALL emails (including unsubs) so master list is complete
-          zipMap: S.acadZips            // ── NEW: zip codes keyed by email
+          emailsSynced: S.acadEmails,          // send ALL emails (including unsubs) so master list is complete
+          zipMap: S.acadZips,                  // zip codes keyed by email
+          enrolledEmails: [...S.acadEnrolledSet] // emails with Registration Status === 'Registered'
         })
       });
       const sheetData = await sheetResp.json();

@@ -176,22 +176,24 @@ async function readBounceList(sheets) {
 }
 
 // ── zipMap: email -> zip string (optional, may be empty object)
-async function updateMasterList(sheets, emailsSynced, unsubSet, bounceSet, zipMap) {
+// ── enrolledSet: Set of emails where Registration Status === 'Registered'
+async function updateMasterList(sheets, emailsSynced, unsubSet, bounceSet, zipMap, enrolledSet) {
   zipMap = zipMap || {};
+  enrolledSet = enrolledSet || new Set();
   await ensureSheet(sheets, ACADEMY_SHEET_ID, 'MASTER_LIST');
   const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York' });
 
   // Read existing master list
   const existing = await sheets.spreadsheets.values.get({
     spreadsheetId: ACADEMY_SHEET_ID,
-    range: "'MASTER_LIST'!A:F"   // expanded from A:E to include Zip Code column
+    range: "'MASTER_LIST'!A:G"
   });
 
   const rows = existing.data.values || [];
   const hasHeader = rows.length > 0 && rows[0][0] === 'Email';
   const dataRows = hasHeader ? rows.slice(1) : rows;
 
-  // Build map of existing records: email -> [email, firstSeen, lastSeen, status, flaggedDate, zip]
+  // Build map of existing records: email -> [email, firstSeen, lastSeen, status, flaggedDate, zip, currentlyEnrolled]
   const masterMap = new Map();
   dataRows.forEach(r => {
     if (r[0]) masterMap.set(r[0].toLowerCase().trim(), [...r]);
@@ -201,16 +203,18 @@ async function updateMasterList(sheets, emailsSynced, unsubSet, bounceSet, zipMa
   emailsSynced.forEach(email => {
     const key = email.toLowerCase().trim();
     const zip = zipMap[key] || '';
+    const enrolled = enrolledSet.size > 0 ? (enrolledSet.has(key) ? 'Yes' : 'No') : '';
 
     if (unsubSet.has(key)) {
       if (masterMap.has(key)) {
         const rec = masterMap.get(key);
         rec[3] = 'unsubscribed';
         if (!rec[4]) rec[4] = today;
-        if (zip && !rec[5]) rec[5] = zip;  // only fill zip if not already set
+        if (zip && !rec[5]) rec[5] = zip;
+        if (enrolled) rec[6] = enrolled;
         masterMap.set(key, rec);
       } else {
-        masterMap.set(key, [key, today, today, 'unsubscribed', today, zip]);
+        masterMap.set(key, [key, today, today, 'unsubscribed', today, zip, enrolled]);
       }
     } else if (bounceSet.has(key)) {
       if (masterMap.has(key)) {
@@ -218,9 +222,10 @@ async function updateMasterList(sheets, emailsSynced, unsubSet, bounceSet, zipMa
         rec[3] = 'bounced';
         if (!rec[4]) rec[4] = today;
         if (zip && !rec[5]) rec[5] = zip;
+        if (enrolled) rec[6] = enrolled;
         masterMap.set(key, rec);
       } else {
-        masterMap.set(key, [key, today, today, 'bounced', today, zip]);
+        masterMap.set(key, [key, today, today, 'bounced', today, zip, enrolled]);
       }
     } else {
       if (masterMap.has(key)) {
@@ -228,10 +233,11 @@ async function updateMasterList(sheets, emailsSynced, unsubSet, bounceSet, zipMa
         rec[2] = today;
         // Only upgrade to active — don't overwrite unsubscribed/bounced
         if (rec[3] !== 'unsubscribed' && rec[3] !== 'bounced') rec[3] = 'active';
-        if (zip && !rec[5]) rec[5] = zip;  // fill zip if missing
+        if (zip && !rec[5]) rec[5] = zip;
+        if (enrolled) rec[6] = enrolled;
         masterMap.set(key, rec);
       } else {
-        masterMap.set(key, [key, today, today, 'active', '', zip]);
+        masterMap.set(key, [key, today, today, 'active', '', zip, enrolled]);
       }
     }
   });
@@ -250,8 +256,8 @@ async function updateMasterList(sheets, emailsSynced, unsubSet, bounceSet, zipMa
   });
 
   const outputRows = [
-    ['Email', 'First Seen', 'Last Seen', 'Status', 'Flagged Date', 'Zip Code'],
-    ...Array.from(masterMap.values()).map(r => [r[0]||'', r[1]||'', r[2]||'', r[3]||'active', r[4]||'', r[5]||''])
+    ['Email', 'First Seen', 'Last Seen', 'Status', 'Flagged Date', 'Zip Code', 'Currently Enrolled'],
+    ...Array.from(masterMap.values()).map(r => [r[0]||'', r[1]||'', r[2]||'', r[3]||'active', r[4]||'', r[5]||'', r[6]||''])
   ];
 
   await sheets.spreadsheets.values.update({
@@ -268,7 +274,7 @@ async function updateMasterList(sheets, emailsSynced, unsubSet, bounceSet, zipMa
   return { total: masterMap.size, active: activeCount, unsub: unsubCount, bounced: bounceCount };
 }
 
-async function writeToAcademySheet(statsBefore, statsAfter, emailsSynced, unsubSet, bounceSet, sheetsClient, zipMap) {
+async function writeToAcademySheet(statsBefore, statsAfter, emailsSynced, unsubSet, bounceSet, sheetsClient, zipMap, enrolledSet) {
   if (!ACADEMY_SHEET_ID) return {};
   try {
     const sheets = sheetsClient;
@@ -293,8 +299,8 @@ async function writeToAcademySheet(statsBefore, statsAfter, emailsSynced, unsubS
       requestBody: { values: [[now, statsAfter.total, statsAfter.unsub, statsAfter.active, trueNew, bounceCount]] }
     });
 
-    // Update MASTER_LIST (pass zipMap through)
-    const masterStats = await updateMasterList(sheets, emailsSynced, unsubSet, bounceSet, zipMap);
+    // Update MASTER_LIST
+    const masterStats = await updateMasterList(sheets, emailsSynced, unsubSet, bounceSet, zipMap, enrolledSet);
 
     console.log(`Academy sheet updated: ${now}, total=${statsAfter.total}, unsub=${statsAfter.unsub}, active=${statsAfter.active}, new=${trueNew}, bounces=${bounceCount}`);
     return masterStats;
@@ -596,7 +602,7 @@ app.get('/unsubscribes', async (req, res) => {
 
 app.post('/sync-academy-sheet', async (req, res) => {
   try {
-    const { statsBefore, emailsSynced, zipMap } = req.body;  // ── NEW: destructure zipMap
+    const { statsBefore, emailsSynced, zipMap, enrolledEmails } = req.body;
     console.log("sync-academy-sheet received emailsSynced count:", (emailsSynced || []).length);
     const token = await getValidToken();
 
@@ -612,7 +618,8 @@ app.post('/sync-academy-sheet', async (req, res) => {
     await new Promise(resolve => setTimeout(resolve, 5000));
 
     const statsAfter = await getAcademyListStats(token);
-    const masterStats = await writeToAcademySheet(statsBefore, statsAfter, emailsSynced || [], unsubSet, bounceSet, sheets, zipMap || {});
+    const enrolledSet = new Set((enrolledEmails || []).map(e => e.toLowerCase().trim()));
+    const masterStats = await writeToAcademySheet(statsBefore, statsAfter, emailsSynced || [], unsubSet, bounceSet, sheets, zipMap || {}, enrolledSet);
     res.json({ success: true, statsBefore, statsAfter, trueNew: statsAfter.active - statsBefore.active, masterStats });
   } catch(e) {
     res.status(500).json({ error: e.message });
