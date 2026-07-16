@@ -455,6 +455,11 @@ function parseMemRaw() {
     'friends of the club membership': 'Friends of the Club',
     'honorary':                       'Honorary',
     'officials':                      'Official',
+    // Partial names that appear when ActiveNet wraps "Full/Part/Junior-Time Club Coach"
+    // across multiple rows — the first fragment lands on the contact's name row
+    'full-time club':                 'Coaches',
+    'part-time club':                 'Coaches',
+    'junior club':                    'Coaches',
   };
   function normalisePkg(raw) {
     const key = raw.toLowerCase().trim();
