@@ -786,9 +786,28 @@ app.post('/import', async (req, res) => {
 
 app.post('/sync-membership-sheet', async (req, res) => {
   try {
-    const { membershipData, unsubByType = {} } = req.body;
+    const { membershipData, unsubByType = {}, listIds = {} } = req.body;
     await writeToMembershipSheet(membershipData, unsubByType);
-    res.json({ success: true });
+
+    // Live cleanup: remove anyone CC currently has as unsubscribed from each
+    // type's list, regardless of whether they were caught by the pasted export.
+    let removedFromCC = 0;
+    const removalByType = {};
+    const listIdEntries = Object.entries(listIds).filter(([, id]) => id);
+    if (listIdEntries.length) {
+      const token = await getValidToken();
+      for (const [type, listId] of listIdEntries) {
+        try {
+          const removed = await removeUnsubsFromList(token, listId);
+          removalByType[type] = removed;
+          removedFromCC += removed;
+        } catch(e) {
+          console.error(`removeUnsubsFromList failed for "${type}":`, e.message);
+        }
+      }
+    }
+
+    res.json({ success: true, removedFromCC, removalByType });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
@@ -834,10 +853,13 @@ app.post('/sync-academy-sheet', async (req, res) => {
     // Wait a few seconds for CC to process the import
     await new Promise(resolve => setTimeout(resolve, 5000));
 
+    // Live cleanup: remove anyone CC has marked unsubscribed from the Academy list itself
+    const removedFromCC = await removeUnsubsFromList(token, ACADEMY_LIST_ID);
+
     const statsAfter = await getAcademyListStats(token);
     const enrolledSet = new Set((enrolledEmails || []).map(e => e.toLowerCase().trim()));
     const masterStats = await writeToAcademySheet(statsBefore, statsAfter, emailsSynced || [], unsubSet, bounceSet, sheets, zipMap || {}, enrolledSet);
-    res.json({ success: true, statsBefore, statsAfter, trueNew: statsAfter.active - statsBefore.active, masterStats });
+    res.json({ success: true, statsBefore, statsAfter, trueNew: statsAfter.active - statsBefore.active, masterStats, removedFromCC });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
