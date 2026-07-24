@@ -19,6 +19,19 @@ const ACADEMY_SHEET_ID = process.env.ACADEMY_SHEET_ID;
 const ACADEMY_LIST_ID = '132ca7fe-47cb-11f1-bdf1-02420a320003';
 const PROGRAMS_SHEET_ID = process.env.PROGRAMS_SHEET_ID;
 
+// Gmail OAuth (separate app registration from the CC one — user-consent flow,
+// since a service account has no mailbox of its own to search/draft in)
+const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID;
+const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
+const GMAIL_REDIRECT_URI = process.env.GMAIL_REDIRECT_URI;
+
+const OUTREACH_CONFIG = {
+  SUBJECT: 'SC Boston | Confirm Your Email Preferences',
+  REPLY_TO: 'ben.anderson@scboston.org',
+  CC_EMAIL: 'club.info@scboston.org',
+  REDRAFT_AFTER_DAYS: 60,
+};
+
 // Extensible subcategory config — add new entries here without touching any other code
 const PROGRAMS_SUBCATEGORIES = {
   "Programs": [
@@ -48,6 +61,12 @@ const PROGRAMS_SUBCATEGORIES = {
 let storedTokens = {
   access_token: '',
   refresh_token: process.env.SAVED_REFRESH_TOKEN || '',
+  expires_at: 0
+};
+
+let storedGmailTokens = {
+  access_token: '',
+  refresh_token: process.env.SAVED_GMAIL_REFRESH_TOKEN || '',
   expires_at: 0
 };
 
@@ -126,6 +145,155 @@ async function writeToMembershipSheet(membershipData, unsubByType = {}) {
   } catch(e) {
     console.error('Membership sheet write error:', e.message);
   }
+}
+
+// ── GMAIL OUTREACH ──────────────────────────────────────────
+// Returns the Date of the most recent sent email to `email` matching the
+// outreach subject, or null if none found.
+async function findLastSentDate(email, token) {
+  try {
+    const q = `in:sent to:${email} subject:"${OUTREACH_CONFIG.SUBJECT}"`;
+    const resp = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=1&q=${encodeURIComponent(q)}`,
+      { headers: { 'Authorization': 'Bearer ' + token } }
+    );
+    const data = await resp.json();
+    const msgId = data.messages && data.messages[0] && data.messages[0].id;
+    if (!msgId) return null;
+
+    const msgResp = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msgId}?format=minimal`,
+      { headers: { 'Authorization': 'Bearer ' + token } }
+    );
+    const msgData = await msgResp.json();
+    if (!msgData.internalDate) return null;
+    return new Date(parseInt(msgData.internalDate, 10));
+  } catch(e) {
+    console.error(`findLastSentDate error for ${email}:`, e.message);
+    return null;
+  }
+}
+
+function buildOutreachEmailBody(firstName) {
+  return `Dear ${firstName},
+
+Our records indicate that your email address is currently unsubscribed from communications from The Skating Club of Boston. As a result, you are not currently receiving Club emails, including updates about upcoming events, membership information, schedule changes, programs, and other opportunities at the Club.
+
+If this unsubscribe request was made in error, you can resubscribe at any time here: https://scboston.org/subscribe. If you would like to update the email address associated with your account, please reply to this email and we would be happy to assist.
+
+If your unsubscribe was intentional, no action is needed. No matter your communication preferences, you will always be an important part of the Club community, and we are grateful to have you with us.
+
+Thank you,`;
+}
+
+function buildMimeMessage({ to, cc, replyTo, subject, textBody }) {
+  const headers = [
+    `To: ${to}`,
+    cc ? `Cc: ${cc}` : null,
+    replyTo ? `Reply-To: ${replyTo}` : null,
+    `Subject: ${subject}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    'MIME-Version: 1.0'
+  ].filter(Boolean).join('\r\n');
+  const raw = `${headers}\r\n\r\n${textBody}`;
+  return Buffer.from(raw).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function createGmailDraft(email, firstName, token) {
+  const raw = buildMimeMessage({
+    to: email,
+    cc: OUTREACH_CONFIG.CC_EMAIL,
+    replyTo: OUTREACH_CONFIG.REPLY_TO,
+    subject: OUTREACH_CONFIG.SUBJECT,
+    textBody: buildOutreachEmailBody(firstName)
+  });
+  const resp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/drafts', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: { raw } })
+  });
+  if (!resp.ok) {
+    const errBody = await resp.text();
+    throw new Error(`HTTP ${resp.status}: ${errBody}`);
+  }
+  return resp.json();
+}
+
+// Builds email -> firstName across all membership types, for draft personalization
+function buildNameLookup(membershipData) {
+  const lookup = {};
+  Object.values(membershipData || {}).forEach(contacts => {
+    (contacts || []).forEach(c => {
+      if (c.email && c.firstName) lookup[c.email.toLowerCase().trim()] = c.firstName;
+    });
+  });
+  return lookup;
+}
+
+async function writeOutreachColumn(sheets, type, dates) {
+  const rows = [['Outreach Date'], ...dates.map(d => [d || ''])];
+  const clearEnd = Math.max(dates.length + 1, 2);
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: MEMBERSHIP_SHEET_ID,
+    range: `'${type}'!F1:F${clearEnd}`
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: MEMBERSHIP_SHEET_ID,
+    range: `'${type}'!F1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: rows }
+  });
+}
+
+// For each unsubscribed email (per membership type): check Gmail Sent for prior
+// outreach. If found and recent, skip. If found but stale, or never sent, draft.
+async function checkOutreachAndDraft(membershipData, unsubByType) {
+  const token = await getValidGmailToken();
+  const nameLookup = buildNameLookup(membershipData);
+  const auth = await getGoogleAuth().getClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  const perType = {};
+  let totalDated = 0, totalDrafted = 0, totalSkipped = 0;
+  const errors = [];
+
+  for (const [type, emails] of Object.entries(unsubByType)) {
+    const dates = [];
+    let drafted = 0, dated = 0, skipped = 0;
+
+    for (const rawEmail of emails) {
+      const email = (rawEmail || '').toLowerCase().trim();
+      if (!email) { dates.push(''); continue; }
+
+      const sentDate = await findLastSentDate(email, token);
+      let shouldDraft = true;
+
+      if (sentDate) {
+        dates.push(sentDate.toLocaleDateString('en-US', { timeZone: 'America/New_York' }));
+        dated++; totalDated++;
+        const daysSince = (Date.now() - sentDate.getTime()) / 86400000;
+        if (daysSince <= OUTREACH_CONFIG.REDRAFT_AFTER_DAYS) shouldDraft = false;
+      } else {
+        dates.push('');
+      }
+
+      if (shouldDraft) {
+        try {
+          await createGmailDraft(email, nameLookup[email] || 'Member', token);
+          drafted++; totalDrafted++;
+        } catch(e) {
+          errors.push(`${email}: ${e.message}`);
+        }
+      } else {
+        skipped++; totalSkipped++;
+      }
+    }
+
+    await writeOutreachColumn(sheets, type, dates);
+    perType[type] = { dated, drafted, skipped, total: emails.length };
+  }
+
+  return { perType, totalDated, totalDrafted, totalSkipped, errors };
 }
 
 async function fetchAllUnsubscribes(token) {
@@ -490,6 +658,55 @@ async function getValidToken() {
   return storedTokens.access_token;
 }
 
+async function saveGmailRefreshToken(token) {
+  if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
+  try {
+    await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars/SAVED_GMAIL_REFRESH_TOKEN`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': 'Bearer ' + RENDER_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ value: token })
+    });
+    console.log('Gmail refresh token saved to Render environment');
+  } catch(e) {
+    console.error('Failed to save Gmail refresh token:', e.message);
+  }
+}
+
+async function refreshGmailAccessToken() {
+  if (!storedGmailTokens.refresh_token) {
+    throw new Error('No Gmail refresh token available. Please authorize Gmail.');
+  }
+  const resp = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: storedGmailTokens.refresh_token,
+      client_id: GMAIL_CLIENT_ID,
+      client_secret: GMAIL_CLIENT_SECRET
+    })
+  });
+  const data = await resp.json();
+  if (data.access_token) {
+    storedGmailTokens.access_token = data.access_token;
+    storedGmailTokens.expires_at = Date.now() + (data.expires_in * 1000) - 60000;
+    console.log('Gmail token refreshed successfully, expires in', data.expires_in, 'seconds');
+  } else {
+    throw new Error('Gmail token refresh failed: ' + JSON.stringify(data));
+  }
+}
+
+async function getValidGmailToken() {
+  if (storedGmailTokens.access_token && Date.now() < storedGmailTokens.expires_at) {
+    return storedGmailTokens.access_token;
+  }
+  await refreshGmailAccessToken();
+  return storedGmailTokens.access_token;
+}
+
 // NEW: Clean auth status endpoint — never throws, always returns JSON
 app.get('/auth-status', (req, res) => {
   const hasRefreshToken = !!storedTokens.refresh_token;
@@ -705,6 +922,94 @@ app.get('/callback', async (req, res) => {
     }
   } catch(e) {
     res.status(500).send('<h2>Error</h2><pre>' + e.message + '</pre>');
+  }
+});
+
+// ── GMAIL OAUTH ENDPOINTS ────────────────────────────────────
+app.get('/gmail-auth-status', (req, res) => {
+  const hasRefreshToken = !!storedGmailTokens.refresh_token;
+  const hasValidToken = !!storedGmailTokens.access_token && Date.now() < storedGmailTokens.expires_at;
+  const minutesLeft = hasValidToken ? Math.round((storedGmailTokens.expires_at - Date.now()) / 60000) : 0;
+
+  if (hasValidToken) {
+    res.json({ status: 'authorized', minutesLeft, message: `Token valid for ~${minutesLeft} more minutes` });
+  } else if (hasRefreshToken) {
+    res.json({ status: 'can_refresh', minutesLeft: 0, message: 'Token expired but refresh token available — will auto-refresh on next use' });
+  } else {
+    res.json({ status: 'unauthorized', minutesLeft: 0, message: 'Not authorized — click Authorize Gmail below' });
+  }
+});
+
+app.get('/gmail-auth-url', (req, res) => {
+  const params = new URLSearchParams({
+    client_id: GMAIL_CLIENT_ID,
+    redirect_uri: GMAIL_REDIRECT_URI,
+    response_type: 'code',
+    access_type: 'offline',
+    prompt: 'consent',
+    scope: 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose'
+  });
+  res.json({ url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}` });
+});
+
+app.get('/gmail-callback', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).send('No code provided');
+  try {
+    const resp = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        client_id: GMAIL_CLIENT_ID,
+        client_secret: GMAIL_CLIENT_SECRET,
+        redirect_uri: GMAIL_REDIRECT_URI
+      })
+    });
+    const data = await resp.json();
+    if (data.access_token) {
+      storedGmailTokens.access_token = data.access_token;
+      storedGmailTokens.expires_at = Date.now() + (data.expires_in * 1000) - 60000;
+      if (data.refresh_token) {
+        storedGmailTokens.refresh_token = data.refresh_token;
+        await saveGmailRefreshToken(data.refresh_token);
+      }
+      console.log('Gmail authorization successful. Token expires in', data.expires_in, 'seconds');
+      res.send(`
+        <html><head><title>Gmail Authorized</title></head>
+        <body style="font-family:system-ui;text-align:center;padding:60px;background:#f5f5f3">
+          <div style="max-width:400px;margin:0 auto;background:#fff;border-radius:16px;padding:40px;border:1px solid #e5e5e0">
+            <div style="font-size:48px;margin-bottom:16px">✅</div>
+            <h2 style="font-weight:500;margin-bottom:8px">Gmail authorized!</h2>
+            <p style="color:#666;font-size:14px">The backend can now check outreach history and create drafts.<br>You can close this tab.</p>
+            <script>setTimeout(() => window.close(), 2000);<\/script>
+          </div>
+        </body></html>
+      `);
+    } else {
+      console.error('Gmail auth failed:', JSON.stringify(data));
+      res.status(500).send('<h2>Gmail authorization failed</h2><pre>' + JSON.stringify(data, null, 2) + '</pre>');
+    }
+  } catch(e) {
+    res.status(500).send('<h2>Error</h2><pre>' + e.message + '</pre>');
+  }
+});
+
+// Runs the Gmail outreach check + draft creation for a set of unsubscribed
+// emails, keyed by membership type. Writes the Outreach Date column (F) on
+// each type tab in the same pass.
+app.post('/check-outreach', async (req, res) => {
+  try {
+    const { membershipData, unsubByType } = req.body;
+    if (!membershipData || !unsubByType) {
+      return res.status(400).json({ error: 'membershipData and unsubByType required' });
+    }
+    const result = await checkOutreachAndDraft(membershipData, unsubByType);
+    res.json({ success: true, ...result });
+  } catch(e) {
+    console.error('check-outreach error:', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
