@@ -880,12 +880,12 @@ async function runCheckOutreach() {
       return;
     }
     Object.entries(data.perType).forEach(([type, r]) => {
-      log('mem-log', `${type}: ${r.dated} dated, ${r.drafted} drafts created, ${r.skipped} skipped (recent outreach on file)`, 'ok');
+      log('mem-log', `${type}: ${r.dated} dated, ${r.drafted} drafts created, ${r.skipped} skipped (recent outreach on file), ${r.alreadyDrafted || 0} skipped (draft already exists)`, 'ok');
     });
     if (data.errors && data.errors.length) {
       data.errors.forEach(e => log('mem-log', 'Draft error: ' + e, 'warn'));
     }
-    showStatus('mem-status', `Outreach check complete. ${data.totalDrafted} drafts created, ${data.totalDated} dates recorded, ${data.totalSkipped} skipped.`, 'success');
+    showStatus('mem-status', `Outreach check complete. ${data.totalDrafted} drafts created, ${data.totalDated} dates recorded, ${data.totalSkipped} skipped (recent outreach), ${data.totalAlreadyDrafted || 0} skipped (draft already existed).`, 'success');
   } catch(e) {
     log('mem-log', 'Outreach check error: ' + e.message, 'err');
     showStatus('mem-status', 'Outreach check error. See log below.', 'error');
