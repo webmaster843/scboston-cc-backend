@@ -811,10 +811,15 @@ async function runMembershipSync() {
       const sheetResp = await fetch(BACKEND + '/sync-membership-sheet', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ membershipData: S.memData, unsubByType })
+        body: JSON.stringify({ membershipData: S.memData, unsubByType, listIds: S.listIds })
       });
       const sheetData = await sheetResp.json();
-      if (sheetData.success) log('mem-log', 'Membership sheet updated.', 'ok');
+      if (sheetData.success) {
+        log('mem-log', 'Membership sheet updated.', 'ok');
+        if (sheetData.removedFromCC) {
+          log('mem-log', `Removed ${sheetData.removedFromCC} unsubscribed contacts from Constant Contact lists.`, 'ok');
+        }
+      }
       else log('mem-log', 'Sheet update failed: ' + JSON.stringify(sheetData), 'warn');
     } catch(e) {
       log('mem-log', 'Sheet update error: ' + e.message, 'warn');
@@ -914,6 +919,9 @@ async function runAcademySync() {
       if (sheetData.success) {
         const ms = sheetData.masterStats || {};
         log('acad-log', `Academy sheet updated. Master list: ${ms.total||0} total, ${ms.active||0} active, ${ms.unsub||0} unsubscribed, ${ms.bounced||0} bounced.`, 'ok');
+        if (sheetData.removedFromCC) {
+          log('acad-log', `Removed ${sheetData.removedFromCC} unsubscribed contacts from the Academy Constant Contact list.`, 'ok');
+        }
       } else {
         log('acad-log', 'Sheet update failed: ' + JSON.stringify(sheetData), 'warn');
       }
