@@ -698,8 +698,8 @@ function parseAcadRaw() {
   const headers = rows[0].map(h => h.trim());
   const p1 = headers.findIndex(h => h.toLowerCase() === 'p1email');
   const p2 = headers.findIndex(h => h.toLowerCase() === 'p2email');
-  const zipCol = headers.findIndex(h => h.toLowerCase() === 'zip code');
-  const regCol = headers.findIndex(h => h.toLowerCase() === 'seasonname');
+  const zipCol = headers.findIndex(h => ['zip code','zipcode','zip','postal code','postal'].includes(h.toLowerCase()));
+  const regCol = headers.findIndex(h => ['registration status','registrationstatus'].includes(h.toLowerCase()));
 
   if (p1 === -1 && p2 === -1) {
     showStatus('acad-status','Could not find "P1 Email" or "P2 Email" columns. Check your header row.','error');
@@ -713,7 +713,7 @@ function parseAcadRaw() {
 
   rows.slice(1).forEach(r => {
     const zip = zipCol !== -1 ? (r[zipCol] || '').trim() : '';
-    const isRegistered = regCol !== -1 && (r[regCol] || '').trim().toLowerCase() === '2026-2027 learn to skate classes';
+    const isRegistered = regCol !== -1 && (r[regCol] || '').trim().toLowerCase() === 'registered';
     if (isRegistered) enrolledHouseholds++;
     [p1, p2].forEach(col => {
       if (col === -1) return;
