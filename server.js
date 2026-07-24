@@ -150,9 +150,21 @@ async function writeToMembershipSheet(membershipData, unsubByType = {}) {
 // ── GMAIL OUTREACH ──────────────────────────────────────────
 // Returns the Date of the most recent sent email to `email` matching the
 // outreach subject, or null if none found.
+// Gmail's exact-phrase subject match doesn't reliably handle the "|" character
+// even inside quotes — build the search clause as separate quoted phrases
+// instead of one literal string containing the pipe.
+function outreachSubjectClause() {
+  return OUTREACH_CONFIG.SUBJECT
+    .split('|')
+    .map(part => part.trim())
+    .filter(Boolean)
+    .map(part => `subject:"${part}"`)
+    .join(' ');
+}
+
 async function findLastSentDate(email, token) {
   try {
-    const q = `in:sent to:${email} subject:"${OUTREACH_CONFIG.SUBJECT}"`;
+    const q = `in:sent to:${email} ${outreachSubjectClause()}`;
     const resp = await fetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=1&q=${encodeURIComponent(q)}`,
       { headers: { 'Authorization': 'Bearer ' + token } }
@@ -171,6 +183,23 @@ async function findLastSentDate(email, token) {
   } catch(e) {
     console.error(`findLastSentDate error for ${email}:`, e.message);
     return null;
+  }
+}
+
+// Checks for an existing, not-yet-sent draft to this address with the outreach
+// subject — prevents re-runs from creating duplicate drafts for the same person.
+async function hasExistingDraft(email, token) {
+  try {
+    const q = `to:${email} ${outreachSubjectClause()}`;
+    const resp = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/drafts?maxResults=1&q=${encodeURIComponent(q)}`,
+      { headers: { 'Authorization': 'Bearer ' + token } }
+    );
+    const data = await resp.json();
+    return !!(data.drafts && data.drafts.length);
+  } catch(e) {
+    console.error(`hasExistingDraft error for ${email}:`, e.message);
+    return false; // fail open toward "check again next time" rather than silently skipping
   }
 }
 
@@ -254,12 +283,12 @@ async function checkOutreachAndDraft(membershipData, unsubByType) {
   const sheets = google.sheets({ version: 'v4', auth });
 
   const perType = {};
-  let totalDated = 0, totalDrafted = 0, totalSkipped = 0;
+  let totalDated = 0, totalDrafted = 0, totalSkipped = 0, totalAlreadyDrafted = 0;
   const errors = [];
 
   for (const [type, emails] of Object.entries(unsubByType)) {
     const dates = [];
-    let drafted = 0, dated = 0, skipped = 0;
+    let drafted = 0, dated = 0, skipped = 0, alreadyDrafted = 0;
 
     for (const rawEmail of emails) {
       const email = (rawEmail || '').toLowerCase().trim();
@@ -278,11 +307,16 @@ async function checkOutreachAndDraft(membershipData, unsubByType) {
       }
 
       if (shouldDraft) {
-        try {
-          await createGmailDraft(email, nameLookup[email] || 'Member', token);
-          drafted++; totalDrafted++;
-        } catch(e) {
-          errors.push(`${email}: ${e.message}`);
+        const alreadyHasDraft = await hasExistingDraft(email, token);
+        if (alreadyHasDraft) {
+          alreadyDrafted++; totalAlreadyDrafted++;
+        } else {
+          try {
+            await createGmailDraft(email, nameLookup[email] || 'Member', token);
+            drafted++; totalDrafted++;
+          } catch(e) {
+            errors.push(`${email}: ${e.message}`);
+          }
         }
       } else {
         skipped++; totalSkipped++;
@@ -290,10 +324,10 @@ async function checkOutreachAndDraft(membershipData, unsubByType) {
     }
 
     await writeOutreachColumn(sheets, type, dates);
-    perType[type] = { dated, drafted, skipped, total: emails.length };
+    perType[type] = { dated, drafted, skipped, alreadyDrafted, total: emails.length };
   }
 
-  return { perType, totalDated, totalDrafted, totalSkipped, errors };
+  return { perType, totalDated, totalDrafted, totalSkipped, totalAlreadyDrafted, errors };
 }
 
 async function fetchAllUnsubscribes(token) {
