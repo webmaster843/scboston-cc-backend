@@ -96,6 +96,23 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
     </div>
 
     <div class="card">
+      <div class="section-title">Gmail authorization</div>
+
+      <!-- Gmail auth banner -->
+      <div class="auth-banner checking" id="gmail-auth-banner">
+        <div>
+          <div class="auth-msg"><i class="ti ti-refresh" style="font-size:15px"></i> <span id="gmail-auth-banner-msg">Checking authorization...</span></div>
+          <div class="auth-sub" id="gmail-auth-banner-sub"></div>
+        </div>
+        <div id="gmail-auth-banner-action"></div>
+      </div>
+
+      <div style="font-size:12px;color:#666;line-height:1.6">
+        Click <strong>Authorize Gmail</strong> to let the tool check your Sent folder for prior outreach and create drafts on the Membership Sync tab. This uses your own Google login, separate from the Constant Contact connection above.
+      </div>
+    </div>
+
+    <div class="card">
       <div class="section-title">Membership list IDs</div>
       <div style="font-size:12px;color:#666;margin-bottom:10px">Pre-filled from your existing setup. Update if any change.</div>
       <div id="list-ids-grid"></div>
@@ -148,7 +165,9 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
     <div class="btn-group">
       <button class="btn btn-primary" onclick="runMembershipSync()"><i class="ti ti-refresh" style="font-size:13px"></i> Sync to Constant Contact</button>
       <button class="btn" onclick="exportMembershipCSV()"><i class="ti ti-download" style="font-size:13px"></i> Download CSVs</button>
+      <button class="btn" onclick="runCheckOutreach()"><i class="ti ti-mail-check" style="font-size:13px"></i> Check Outreach &amp; Create Drafts</button>
     </div>
+    <div class="hint" style="margin-bottom:0">Run this after a sync above. Checks your Gmail Sent folder for prior outreach to each unsubscribed address, records the date, and creates a draft (not sent) for anyone with no recent contact.</div>
     <div class="log" id="mem-log"></div>
   </div>
 
@@ -284,6 +303,7 @@ let S = {
   acadSynced: new Set(),
   acadUnsubSet: new Set(),
   authPolling: null,
+  gmailAuthPolling: null,
   // Programs/Events state
   progListIds: {},
   progData: [],
@@ -362,6 +382,77 @@ async function triggerAuth() {
 
   } catch(e) {
     alert('Could not reach backend to get auth URL. It may be waking up — wait 30 seconds and try again.');
+  }
+}
+
+// ─── GMAIL AUTH STATUS ─────────────────────────────────────────
+
+async function checkGmailAuthStatus() {
+  const banner = document.getElementById('gmail-auth-banner');
+  const msg = document.getElementById('gmail-auth-banner-msg');
+  const sub = document.getElementById('gmail-auth-banner-sub');
+  const action = document.getElementById('gmail-auth-banner-action');
+
+  try {
+    const resp = await fetch(BACKEND + '/gmail-auth-status');
+    const data = await resp.json();
+
+    if (data.status === 'authorized') {
+      banner.className = 'auth-banner authorized';
+      msg.innerHTML = '<i class="ti ti-circle-check" style="font-size:15px"></i> Connected to Gmail';
+      sub.textContent = data.message;
+      action.innerHTML = `<button class="btn btn-sm" onclick="triggerGmailAuth()"><i class="ti ti-refresh" style="font-size:13px"></i> Re-authorize</button>`;
+    } else if (data.status === 'can_refresh') {
+      banner.className = 'auth-banner can-refresh';
+      msg.innerHTML = '<i class="ti ti-alert-triangle" style="font-size:15px"></i> Token expired — will auto-refresh on next use';
+      sub.textContent = 'Or click Authorize to refresh now';
+      action.innerHTML = `<button class="btn btn-auth btn-sm" onclick="triggerGmailAuth()"><i class="ti ti-key" style="font-size:13px"></i> Authorize Gmail</button>`;
+    } else {
+      banner.className = 'auth-banner unauthorized';
+      msg.innerHTML = '<i class="ti ti-alert-circle" style="font-size:15px"></i> Not authorized';
+      sub.textContent = 'Click Authorize to connect your Gmail account';
+      action.innerHTML = `<button class="btn btn-auth btn-sm" onclick="triggerGmailAuth()"><i class="ti ti-key" style="font-size:13px"></i> Authorize Gmail</button>`;
+    }
+  } catch(e) {
+    banner.className = 'auth-banner unauthorized';
+    msg.innerHTML = '<i class="ti ti-wifi-off" style="font-size:15px"></i> Backend unreachable';
+    sub.textContent = 'The backend may be waking up — wait 30 seconds and refresh';
+    action.innerHTML = `<button class="btn btn-sm" onclick="checkGmailAuthStatus()"><i class="ti ti-refresh" style="font-size:13px"></i> Retry</button>`;
+  }
+}
+
+async function triggerGmailAuth() {
+  try {
+    const resp = await fetch(BACKEND + '/gmail-auth-url');
+    const data = await resp.json();
+    const authWindow = window.open(data.url, '_blank');
+
+    if (S.gmailAuthPolling) clearInterval(S.gmailAuthPolling);
+    const banner = document.getElementById('gmail-auth-banner');
+    const msg = document.getElementById('gmail-auth-banner-msg');
+    const sub = document.getElementById('gmail-auth-banner-sub');
+    banner.className = 'auth-banner checking';
+    msg.innerHTML = '<i class="ti ti-loader" style="font-size:15px"></i> Waiting for authorization...';
+    sub.textContent = 'Complete the login in the tab that just opened';
+
+    S.gmailAuthPolling = setInterval(async () => {
+      try {
+        const r = await fetch(BACKEND + '/gmail-auth-status');
+        const d = await r.json();
+        if (d.status === 'authorized') {
+          clearInterval(S.gmailAuthPolling);
+          S.gmailAuthPolling = null;
+          checkGmailAuthStatus();
+        }
+      } catch(e) { /* keep polling */ }
+    }, 3000);
+
+    setTimeout(() => {
+      if (S.gmailAuthPolling) { clearInterval(S.gmailAuthPolling); S.gmailAuthPolling = null; }
+    }, 300000);
+
+  } catch(e) {
+    alert('Could not reach backend to get Gmail auth URL. It may be waking up — wait 30 seconds and try again.');
   }
 }
 
@@ -715,6 +806,7 @@ async function runMembershipSync() {
         if (flagged.length) unsubByType[type] = flagged;
       }
       const totalUnsub = Object.values(unsubByType).reduce((s, a) => s + a.length, 0);
+      S.lastUnsubByType = unsubByType;
       log('mem-log', `Flagging ${totalUnsub} unsubscribed addresses in sheet...`);
       const sheetResp = await fetch(BACKEND + '/sync-membership-sheet', {
         method: 'POST',
@@ -730,6 +822,40 @@ async function runMembershipSync() {
     showStatus('mem-status', `Sync complete. ${totalPushed} contacts pushed to Constant Contact.${skippedTypes ? ' ' + skippedTypes + ' types skipped (no list ID).':''}`, 'success');
   } else {
     showStatus('mem-status', 'No contacts were pushed. Check the log below for details.', 'error');
+  }
+}
+
+async function runCheckOutreach() {
+  if (!S.lastUnsubByType || !Object.keys(S.lastUnsubByType).length) {
+    showStatus('mem-status', 'Run "Sync to Constant Contact" first — outreach check reuses that unsubscribe list.', 'warning');
+    return;
+  }
+  const totalToCheck = Object.values(S.lastUnsubByType).reduce((s, a) => s + a.length, 0);
+  log('mem-log', `Checking Gmail Sent for ${totalToCheck} unsubscribed addresses (this can take a bit)...`);
+  showStatus('mem-status', 'Checking outreach history in Gmail...', 'info');
+
+  try {
+    const resp = await fetch(BACKEND + '/check-outreach', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ membershipData: S.memData, unsubByType: S.lastUnsubByType })
+    });
+    const data = await resp.json();
+    if (!data.success) {
+      log('mem-log', 'Outreach check failed: ' + (data.error || JSON.stringify(data)), 'err');
+      showStatus('mem-status', 'Outreach check failed. See log below.', 'error');
+      return;
+    }
+    Object.entries(data.perType).forEach(([type, r]) => {
+      log('mem-log', `${type}: ${r.dated} dated, ${r.drafted} drafts created, ${r.skipped} skipped (recent outreach on file)`, 'ok');
+    });
+    if (data.errors && data.errors.length) {
+      data.errors.forEach(e => log('mem-log', 'Draft error: ' + e, 'warn'));
+    }
+    showStatus('mem-status', `Outreach check complete. ${data.totalDrafted} drafts created, ${data.totalDated} dates recorded, ${data.totalSkipped} skipped.`, 'success');
+  } catch(e) {
+    log('mem-log', 'Outreach check error: ' + e.message, 'err');
+    showStatus('mem-status', 'Outreach check error. See log below.', 'error');
   }
 }
 
@@ -1064,6 +1190,7 @@ buildProgramsListIdsGrid();
 buildProgSubcategorySelect();
 S.acadListId = '132ca7fe-47cb-11f1-bdf1-02420a320003';
 checkAuthStatus();
+checkGmailAuthStatus();
 </script>
 </body>
 </html>
