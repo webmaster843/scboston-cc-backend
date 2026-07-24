@@ -73,6 +73,7 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
     <div class="tab" onclick="switchTab('membership', event)"><i class="ti ti-users" style="font-size:15px"></i> Membership sync</div>
     <div class="tab" onclick="switchTab('academy', event)"><i class="ti ti-star" style="font-size:15px"></i> Academy sync</div>
     <div class="tab" onclick="switchTab('programs', event)"><i class="ti ti-calendar-event" style="font-size:15px"></i> Programs/Events sync</div>
+    <div class="tab" onclick="switchTab('management', event)"><i class="ti ti-building" style="font-size:15px"></i> Management sync</div>
   </div>
 
   <!-- SETTINGS -->
@@ -243,11 +244,37 @@ textarea{min-height:130px;resize:vertical;font-family:monospace;font-size:12px;l
     <div class="log" id="prog-log"></div>
   </div>
 
+  <!-- MANAGEMENT SYNC -->
+  <div class="panel" id="panel-management">
+    <div id="mgmt-status" class="status"></div>
+
+    <div class="card">
+      <div class="section-title">Step 1 — Google Workspace admin export</div>
+      <div class="hint" style="margin-bottom:8px">Copy your Google Admin user export (First Name, Last Name, Email Address columns, header row included) and paste below. Routed automatically by domain: @scboston.org → Club Management, @skatingacademy.org → Skating Academy Management.</div>
+      <textarea id="mgmt-raw" placeholder="Paste Google Workspace admin export here..."></textarea>
+      <button class="btn btn-sm" onclick="parseMgmtRaw()"><i class="ti ti-table-import" style="font-size:13px"></i> Parse data</button>
+    </div>
+
+    <div id="mgmt-preview" style="display:none;margin-bottom:1rem">
+      <div class="metrics" id="mgmt-metrics"></div>
+    </div>
+
+    <div class="btn-group">
+      <button class="btn btn-primary" onclick="runMgmtSync()"><i class="ti ti-refresh" style="font-size:13px"></i> Sync to Constant Contact</button>
+    </div>
+    <div class="hint" style="margin-bottom:0">Unsubscribed addresses are checked live against Constant Contact at sync time and excluded/removed automatically — no manual unsub paste needed for this tab.</div>
+    <div class="log" id="mgmt-log"></div>
+  </div>
+
 </div>
 
 <script>
 const BACKEND = '';
 const TYPES = ["Family","Single","U.S./World Championships Competitor","Introductory","Team","Friends of the Club","Official","Coaches","Honorary","Club Management","Skating Academy Management","Alumni"];
+const GOOGLE_DOMAIN_MAP = {
+  "scboston.org": "Club Management",
+  "skatingacademy.org": "Skating Academy Management"
+};
 const DEFAULT_IDS = {
   "Family":"25012be6-372f-11f1-a972-02420a320002",
   "Single":"0dd014c2-3730-11f1-a972-02420a320002",
@@ -310,6 +337,7 @@ let S = {
   progSubcategory: '',
   progSource: '',
   progParsedRows: null,
+  mgmtData: {},
 };
 
 // ─── AUTH STATUS ───────────────────────────────────────────────
@@ -1190,6 +1218,117 @@ function exportProgramsCSV() {
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
   a.download = sub.replace(/[^a-z0-9]/gi, '_') + '.csv';
   a.click();
+}
+
+function parseMgmtRaw() {
+  const raw = document.getElementById('mgmt-raw').value;
+  if (!raw.trim()) { showStatus('mgmt-status','Paste your Google Workspace export first.','warning'); return; }
+
+  const rows = parseRows(raw);
+  if (rows.length < 2) { showStatus('mgmt-status','Not enough data found. Check your paste.','error'); return; }
+
+  const headers = rows[0].map(h => h.toLowerCase().trim());
+  const fnCol = headers.findIndex(h => h.includes('first name'));
+  const lnCol = headers.findIndex(h => h.includes('last name'));
+  const emCol = headers.findIndex(h => h.includes('email'));
+
+  if (fnCol === -1 || emCol === -1) {
+    showStatus('mgmt-status','Could not find First Name / Email columns — check your paste includes a header row.','error');
+    return;
+  }
+
+  const byType = { 'Club Management': [], 'Skating Academy Management': [] };
+  const seen = new Set();
+  let skipped = 0;
+
+  rows.slice(1).forEach(r => {
+    const firstName = (r[fnCol] || '').trim();
+    const lastName = lnCol !== -1 ? (r[lnCol] || '').trim() : '';
+    const email = (r[emCol] || '').trim().toLowerCase();
+    if (!validEmail(email) || seen.has(email)) { skipped++; return; }
+    const domain = email.split('@')[1] || '';
+    const type = GOOGLE_DOMAIN_MAP[domain];
+    if (!type) { skipped++; return; }
+    seen.add(email);
+    byType[type].push({ email, firstName, lastName });
+  });
+
+  S.mgmtData = byType;
+
+  const total = byType['Club Management'].length + byType['Skating Academy Management'].length;
+  document.getElementById('mgmt-metrics').innerHTML = `
+    <div class="metric"><div class="val">${byType['Club Management'].length}</div><div class="lbl">Club Management</div></div>
+    <div class="metric"><div class="val">${byType['Skating Academy Management'].length}</div><div class="lbl">Skating Academy Management</div></div>
+    <div class="metric"><div class="val">${total}</div><div class="lbl">Total</div></div>
+  `;
+  document.getElementById('mgmt-preview').style.display = '';
+  showStatus('mgmt-status', `Parsed ${total} contacts.${skipped ? ` ${skipped} skipped (unrecognized domain or invalid email).` : ''}`, 'success');
+}
+
+async function runMgmtSync() {
+  const hasData = S.mgmtData && Object.values(S.mgmtData).some(a => a.length);
+  if (!hasData) { showStatus('mgmt-status','Parse your data first.','warning'); return; }
+
+  const logEl = document.getElementById('mgmt-log');
+  logEl.innerHTML = ''; logEl.classList.add('show');
+  showStatus('mgmt-status', 'Checking Constant Contact for current unsubscribes...', 'info');
+
+  let unsubSet = new Set();
+  try {
+    const resp = await fetch(BACKEND + '/cc-unsubscribes');
+    const data = await resp.json();
+    unsubSet = new Set(data.emails || []);
+    log('mgmt-log', `${unsubSet.size} unsubscribed emails on file in CC.`, 'ok');
+  } catch(e) {
+    log('mgmt-log', 'Could not fetch unsubscribes: ' + e.message + ' — proceeding without suppression.', 'warn');
+  }
+
+  let totalPushed = 0;
+  const membershipData = {};
+  const unsubByType = {};
+  const listIds = {};
+
+  for (const [type, contacts] of Object.entries(S.mgmtData)) {
+    if (!contacts.length) continue;
+    const lid = S.listIds[type];
+    if (!lid) { log('mgmt-log', `No list ID for "${type}" — skipping.`, 'warn'); continue; }
+
+    const active = contacts.filter(c => !unsubSet.has(c.email));
+    const flagged = contacts.filter(c => unsubSet.has(c.email)).map(c => c.email);
+
+    log('mgmt-log', `── ${type} (${active.length} to sync, ${flagged.length} suppressed)`);
+    const pushed = await ccImport(lid, active, 'mgmt-log');
+    totalPushed += pushed;
+
+    membershipData[type] = active;
+    if (flagged.length) unsubByType[type] = flagged;
+    listIds[type] = lid;
+  }
+
+  if (totalPushed > 0) {
+    log('mgmt-log', 'Updating sheet...');
+    try {
+      const sheetResp = await fetch(BACKEND + '/sync-membership-sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ membershipData, unsubByType, listIds })
+      });
+      const sheetData = await sheetResp.json();
+      if (sheetData.success) {
+        log('mgmt-log', 'Sheet updated.', 'ok');
+        if (sheetData.removedFromCC) {
+          log('mgmt-log', `Removed ${sheetData.removedFromCC} unsubscribed contacts from Constant Contact lists.`, 'ok');
+        }
+      } else {
+        log('mgmt-log', 'Sheet update failed: ' + JSON.stringify(sheetData), 'warn');
+      }
+    } catch(e) {
+      log('mgmt-log', 'Sheet update error: ' + e.message, 'warn');
+    }
+    showStatus('mgmt-status', `Sync complete. ${totalPushed} contacts pushed to Constant Contact.`, 'success');
+  } else {
+    showStatus('mgmt-status', 'No contacts were pushed. Check the log below for details.', 'error');
+  }
 }
 
 buildListIdsGrid();
