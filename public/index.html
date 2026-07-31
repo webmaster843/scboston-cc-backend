@@ -630,10 +630,24 @@ function parseMemRaw() {
         // col0 = new package name, col3 = first contact of that package
         currentPkgRaw = col0;
         currentPkg = normalisePkg(currentPkgRaw);
+      } else if (normalisePkg(col0) !== currentPkg || !currentPkg) {
+        // col0 is either a continuation fragment of a wrapped package name,
+        // or ActiveNet has reprinted the current package's label on a
+        // secondary/associated household member's row (no "(p)"). If col0
+        // alone already resolves to the package we're already in, it's just
+        // a repeat — leave state untouched. Otherwise try treating it as a
+        // wrap fragment, but never let a failed parse null out a known-good
+        // currentPkg; keep the last resolved value instead.
+        const combinedRaw = currentPkgRaw ? currentPkgRaw + ' ' + col0 : col0;
+        const combinedPkg = normalisePkg(combinedRaw);
+        if (combinedPkg) {
+          currentPkgRaw = combinedRaw;
+          currentPkg = combinedPkg;
+        }
+        continue;
       } else {
-        // col0 is a continuation fragment of a wrapped package name
-        currentPkgRaw = currentPkgRaw ? currentPkgRaw + ' ' + col0 : col0;
-        currentPkg = normalisePkg(currentPkgRaw);
+        // col0 matches the package we're already in — a repeated label on
+        // a secondary household member's row. Nothing to update.
         continue;
       }
     }
