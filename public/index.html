@@ -824,6 +824,36 @@ async function runMembershipSync() {
     totalPushed += pushed;
   }
 
+  if (totalPushed > 0 && S.listIds['Alumni']) {
+    log('mem-log', 'Checking for lapsed members to move to Alumni...');
+    try {
+      const activeByType = {};
+      for (const [type, contacts] of Object.entries(S.memDataFull)) {
+        activeByType[type] = contacts.map(c => c.email);
+      }
+      const pruneResp = await fetch(BACKEND + '/prune-lapsed-to-alumni', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activeByType, listIds: S.listIds })
+      });
+      const pruneData = await pruneResp.json();
+      if (pruneData.success) {
+        if (pruneData.totalMoved || pruneData.totalReassigned) {
+          Object.entries(pruneData.movedByType).forEach(([type, r]) => {
+            if (r.moved) log('mem-log', `Moved ${r.moved} lapsed ${type} contact(s) to Alumni.`, 'ok');
+            if (r.reassigned) log('mem-log', `Removed ${r.reassigned} ${type} contact(s) already active under another type.`, 'ok');
+          });
+        } else {
+          log('mem-log', 'No lapsed members found — all type lists are current.', 'ok');
+        }
+      } else {
+        log('mem-log', 'Lapsed-member check failed: ' + JSON.stringify(pruneData), 'warn');
+      }
+    } catch(e) {
+      log('mem-log', 'Lapsed-member check error: ' + e.message, 'warn');
+    }
+  }
+
   if (totalPushed > 0) {
     log('mem-log', 'Updating membership sheet...');
     try {

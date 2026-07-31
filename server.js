@@ -551,6 +551,71 @@ async function removeUnsubsFromList(token, listId) {
   return contactIds.length;
 }
 
+// Fetch every contact_id + email currently on a CC list, any status.
+async function getListContactIds(token, listId) {
+  const contacts = [];
+  let cursor = null;
+  let page = 0;
+  try {
+    do {
+      const url = cursor
+        ? `https://api.cc.email/v3/contacts?lists=${listId}&limit=500&cursor=${cursor}`
+        : `https://api.cc.email/v3/contacts?lists=${listId}&limit=500`;
+      const resp = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+      const data = await resp.json();
+      (data.contacts || []).forEach(c => {
+        const addr = c.email_address && c.email_address.address;
+        if (c.contact_id && addr) contacts.push({ id: c.contact_id, email: addr.toLowerCase().trim() });
+      });
+      cursor = data._links && data._links.next
+        ? new URL('https://api.cc.email' + data._links.next.href).searchParams.get('cursor')
+        : null;
+      page++;
+    } while (cursor && page < 50);
+  } catch(e) {
+    console.error('getListContactIds error:', e.message);
+  }
+  return contacts;
+}
+
+async function bulkListMembership(token, activity, contactIds, listId) {
+  for (let i = 0; i < contactIds.length; i += 500) {
+    const batch = contactIds.slice(i, i + 500);
+    await fetch(`https://api.cc.email/v3/activities/${activity}`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: { contact_ids: batch }, list_ids: [listId] })
+    });
+  }
+}
+
+// Anyone currently on `listId` whose email isn't in this sync's active
+// roster for that type is stale on this list. If they're still active
+// under a *different* type this sync (e.g. renewed as Family instead of
+// Single), just drop them from the old list — the normal import step
+// already added them to their new type's list. Only move someone to
+// Alumni if they're not active under any type this sync (a true lapse).
+async function pruneLapsedToAlumni(token, listId, activeEmailSet, allActiveEmails, alumniListId) {
+  if (!listId || !alumniListId || listId === alumniListId) return { moved: 0, reassigned: 0 };
+  const current = await getListContactIds(token, listId);
+  const stale = current.filter(c => !activeEmailSet.has(c.email));
+  if (!stale.length) return { moved: 0, reassigned: 0 };
+
+  const trueLapsed = stale.filter(c => !allActiveEmails.has(c.email));
+  const reassigned = stale.filter(c => allActiveEmails.has(c.email));
+
+  try {
+    await bulkListMembership(token, 'remove_list_memberships', stale.map(c => c.id), listId);
+    if (trueLapsed.length) {
+      await bulkListMembership(token, 'add_list_memberships', trueLapsed.map(c => c.id), alumniListId);
+    }
+    console.log(`List ${listId}: removed ${stale.length} stale contacts (${trueLapsed.length} moved to Alumni, ${reassigned.length} already active under another type this sync)`);
+  } catch(e) {
+    console.error(`pruneLapsedToAlumni error for list ${listId}:`, e.message);
+  }
+  return { moved: trueLapsed.length, reassigned: reassigned.length };
+}
+
 async function writeToProgramsSheet(subcategory, contacts, unsubSet) {
   if (!PROGRAMS_SHEET_ID) return { added: 0, removed: 0, total: 0 };
   const auth = await getGoogleAuth().getClient();
@@ -842,6 +907,46 @@ app.post('/sync-membership-sheet', async (req, res) => {
     }
 
     res.json({ success: true, removedFromCC, removalByType });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// For each membership type, move anyone currently on that type's CC list
+// who no longer appears in this sync's active roster over to the Alumni
+// list, so type lists only ever reflect currently-active members.
+app.post('/prune-lapsed-to-alumni', async (req, res) => {
+  try {
+    const { activeByType = {}, listIds = {} } = req.body;
+    const alumniListId = listIds['Alumni'];
+    if (!alumniListId) return res.status(400).json({ error: 'No list ID configured for Alumni.' });
+
+    const token = await getValidToken();
+
+    // Union of every email active under any type this sync — used to tell
+    // a true lapse apart from someone who just switched membership types.
+    const allActiveEmails = new Set();
+    Object.values(activeByType).forEach(emails => {
+      (emails || []).forEach(e => { if (e) allActiveEmails.add(e.toLowerCase().trim()); });
+    });
+
+    let totalMoved = 0;
+    let totalReassigned = 0;
+    const movedByType = {};
+    for (const [type, emails] of Object.entries(activeByType)) {
+      const listId = listIds[type];
+      if (!listId) continue;
+      const activeSet = new Set((emails || []).map(e => (e || '').toLowerCase().trim()));
+      try {
+        const { moved, reassigned } = await pruneLapsedToAlumni(token, listId, activeSet, allActiveEmails, alumniListId);
+        if (moved || reassigned) movedByType[type] = { moved, reassigned };
+        totalMoved += moved;
+        totalReassigned += reassigned;
+      } catch(e) {
+        console.error(`prune-lapsed-to-alumni failed for "${type}":`, e.message);
+      }
+    }
+    res.json({ success: true, totalMoved, totalReassigned, movedByType });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
