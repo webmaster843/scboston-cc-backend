@@ -85,7 +85,7 @@ function getGoogleAuth() {
 // manually or by an older version of this tool) can be stuck with fewer
 // columns — writing to it then throws "Range exceeds grid limits" and
 // silently kills that sync for that type. Expand it instead of failing.
-const SHEET_MIN_COLUMNS = 10;
+const SHEET_MIN_COLUMNS = 6;
 
 async function ensureSheet(sheets, spreadsheetId, sheetName) {
   const meta = await sheets.spreadsheets.get({ spreadsheetId });
