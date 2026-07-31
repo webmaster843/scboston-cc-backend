@@ -900,7 +900,12 @@ async function runMembershipSync() {
       });
       const sheetData = await sheetResp.json();
       if (sheetData.success) {
-        log('mem-log', 'Membership sheet updated.', 'ok');
+        log('mem-log', `Membership sheet updated (${(sheetData.sheetsUpdated||[]).length} type tabs).`, 'ok');
+        if (sheetData.sheetsFailed && sheetData.sheetsFailed.length) {
+          sheetData.sheetsFailed.forEach(f => {
+            log('mem-log', `Sheet write FAILED for "${f.type}": ${f.error} — this tab's data is stale until the next successful sync.`, 'err');
+          });
+        }
         if (sheetData.removedFromCC) {
           log('mem-log', `Removed ${sheetData.removedFromCC} unsubscribed contacts from Constant Contact lists.`, 'ok');
         }

@@ -78,14 +78,47 @@ function getGoogleAuth() {
   });
 }
 
+// Writes go out to columns A-F (First Name, Last Name, Email, Zip Code,
+// Unsubscribe List, Outreach Date), so every tab needs at least 6 columns.
+// Tabs created by this function get that by default, but a tab that
+// already existed before columns E/F were introduced (e.g. Alumni, created
+// manually or by an older version of this tool) can be stuck with fewer
+// columns — writing to it then throws "Range exceeds grid limits" and
+// silently kills that sync for that type. Expand it instead of failing.
+const SHEET_MIN_COLUMNS = 10;
+
 async function ensureSheet(sheets, spreadsheetId, sheetName) {
   const meta = await sheets.spreadsheets.get({ spreadsheetId });
-  const existing = meta.data.sheets.map(s => s.properties.title);
-  if (!existing.includes(sheetName)) {
+  const existingSheet = meta.data.sheets.find(s => s.properties.title === sheetName);
+
+  if (!existingSheet) {
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId,
       requestBody: {
-        requests: [{ addSheet: { properties: { title: sheetName } } }]
+        requests: [{
+          addSheet: {
+            properties: { title: sheetName, gridProperties: { rowCount: 2000, columnCount: SHEET_MIN_COLUMNS } }
+          }
+        }]
+      }
+    });
+    return;
+  }
+
+  const columnCount = (existingSheet.properties.gridProperties || {}).columnCount || 0;
+  if (columnCount < SHEET_MIN_COLUMNS) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{
+          updateSheetProperties: {
+            properties: {
+              sheetId: existingSheet.properties.sheetId,
+              gridProperties: { columnCount: SHEET_MIN_COLUMNS }
+            },
+            fields: 'gridProperties.columnCount'
+          }
+        }]
       }
     });
   }
@@ -107,55 +140,70 @@ async function getAcademyListStats(token) {
 }
 
 async function writeToMembershipSheet(membershipData, unsubByType = {}) {
-  if (!MEMBERSHIP_SHEET_ID) return;
+  if (!MEMBERSHIP_SHEET_ID) return { updated: [], failed: [] };
+  const updated = [];
+  const failed = [];
   try {
     const auth = await getGoogleAuth().getClient();
     const sheets = google.sheets({ version: 'v4', auth });
     for (const [type, contacts] of Object.entries(membershipData)) {
-      await ensureSheet(sheets, MEMBERSHIP_SHEET_ID, type);
+      // Each type is independent — one type's write failure (transient API
+      // error, rate limit, etc.) must not stop every type after it from
+      // being written. Previously a single try/catch wrapped the whole
+      // loop, so an early failure silently skipped every remaining type
+      // with no indication to the user beyond a server-side log line.
+      try {
+        await ensureSheet(sheets, MEMBERSHIP_SHEET_ID, type);
 
-      const rows = [
-        ['First Name', 'Last Name', 'Email', 'Zip Code'],
-        ...contacts.map(c => [c.firstName || '', c.lastName || '', c.email, c.zip || ''])
-      ];
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MEMBERSHIP_SHEET_ID,
-        range: `'${type}'!A1`,
-        valueInputOption: 'RAW',
-        requestBody: { values: rows }
-      });
+        const rows = [
+          ['First Name', 'Last Name', 'Email', 'Zip Code'],
+          ...contacts.map(c => [c.firstName || '', c.lastName || '', c.email, c.zip || ''])
+        ];
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: MEMBERSHIP_SHEET_ID,
+          range: `'${type}'!A1`,
+          valueInputOption: 'RAW',
+          requestBody: { values: rows }
+        });
 
-      const flagged = unsubByType[type] || [];
-      const eRows = [['Unsubscribe List'], ...flagged.map(e => [e])];
+        const flagged = unsubByType[type] || [];
+        const eRows = [['Unsubscribe List'], ...flagged.map(e => [e])];
 
-      // Clear E AND F together on every sync. E always reflects this sync's
-      // unsubscribe list; F (Outreach Date) is only ever populated by a
-      // separate "Check Outreach & Create Drafts" run, so if we don't wipe
-      // it here too, it can be left showing dates for a completely
-      // different, stale unsubscribe list from a prior sync.
-      const clearEnd = Math.max(contacts.length + 1, flagged.length + 1, 2);
-      await sheets.spreadsheets.values.clear({
-        spreadsheetId: MEMBERSHIP_SHEET_ID,
-        range: `'${type}'!E1:F${clearEnd}`
-      });
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MEMBERSHIP_SHEET_ID,
-        range: `'${type}'!E1`,
-        valueInputOption: 'RAW',
-        requestBody: { values: eRows }
-      });
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: MEMBERSHIP_SHEET_ID,
-        range: `'${type}'!F1`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [['Outreach Date']] }
-      });
+        // Clear E AND F together on every sync. E always reflects this sync's
+        // unsubscribe list; F (Outreach Date) is only ever populated by a
+        // separate "Check Outreach & Create Drafts" run, so if we don't wipe
+        // it here too, it can be left showing dates for a completely
+        // different, stale unsubscribe list from a prior sync.
+        const clearEnd = Math.max(contacts.length + 1, flagged.length + 1, 2);
+        await sheets.spreadsheets.values.clear({
+          spreadsheetId: MEMBERSHIP_SHEET_ID,
+          range: `'${type}'!E1:F${clearEnd}`
+        });
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: MEMBERSHIP_SHEET_ID,
+          range: `'${type}'!E1`,
+          valueInputOption: 'RAW',
+          requestBody: { values: eRows }
+        });
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: MEMBERSHIP_SHEET_ID,
+          range: `'${type}'!F1`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [['Outreach Date']] }
+        });
 
-      console.log(`Membership sheet updated: ${type} (${contacts.length} rows, ${flagged.length} unsubscribes flagged, outreach dates cleared)`);
+        console.log(`Membership sheet updated: ${type} (${contacts.length} rows, ${flagged.length} unsubscribes flagged, outreach dates cleared)`);
+        updated.push(type);
+      } catch(e) {
+        console.error(`Membership sheet write error for "${type}":`, e.message);
+        failed.push({ type, error: e.message });
+      }
     }
   } catch(e) {
-    console.error('Membership sheet write error:', e.message);
+    console.error('Membership sheet write error (setup):', e.message);
+    failed.push({ type: '(setup)', error: e.message });
   }
+  return { updated, failed };
 }
 
 // ── GMAIL OUTREACH ──────────────────────────────────────────
@@ -899,7 +947,7 @@ app.post('/import', async (req, res) => {
 app.post('/sync-membership-sheet', async (req, res) => {
   try {
     const { membershipData, unsubByType = {}, listIds = {} } = req.body;
-    await writeToMembershipSheet(membershipData, unsubByType);
+    const sheetResult = await writeToMembershipSheet(membershipData, unsubByType);
 
     // Live cleanup: remove anyone CC currently has as unsubscribed from each
     // type's list, regardless of whether they were caught by the pasted export.
@@ -919,7 +967,13 @@ app.post('/sync-membership-sheet', async (req, res) => {
       }
     }
 
-    res.json({ success: true, removedFromCC, removalByType });
+    res.json({
+      success: true,
+      removedFromCC,
+      removalByType,
+      sheetsUpdated: sheetResult.updated,
+      sheetsFailed: sheetResult.failed
+    });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
