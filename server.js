@@ -128,10 +128,15 @@ async function writeToMembershipSheet(membershipData, unsubByType = {}) {
       const flagged = unsubByType[type] || [];
       const eRows = [['Unsubscribe List'], ...flagged.map(e => [e])];
 
+      // Clear E AND F together on every sync. E always reflects this sync's
+      // unsubscribe list; F (Outreach Date) is only ever populated by a
+      // separate "Check Outreach & Create Drafts" run, so if we don't wipe
+      // it here too, it can be left showing dates for a completely
+      // different, stale unsubscribe list from a prior sync.
       const clearEnd = Math.max(contacts.length + 1, flagged.length + 1, 2);
       await sheets.spreadsheets.values.clear({
         spreadsheetId: MEMBERSHIP_SHEET_ID,
-        range: `'${type}'!E1:E${clearEnd}`
+        range: `'${type}'!E1:F${clearEnd}`
       });
       await sheets.spreadsheets.values.update({
         spreadsheetId: MEMBERSHIP_SHEET_ID,
@@ -139,8 +144,14 @@ async function writeToMembershipSheet(membershipData, unsubByType = {}) {
         valueInputOption: 'RAW',
         requestBody: { values: eRows }
       });
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: MEMBERSHIP_SHEET_ID,
+        range: `'${type}'!F1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [['Outreach Date']] }
+      });
 
-      console.log(`Membership sheet updated: ${type} (${contacts.length} rows, ${flagged.length} unsubscribes flagged)`);
+      console.log(`Membership sheet updated: ${type} (${contacts.length} rows, ${flagged.length} unsubscribes flagged, outreach dates cleared)`);
     }
   } catch(e) {
     console.error('Membership sheet write error:', e.message);
