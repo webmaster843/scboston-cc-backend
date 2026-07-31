@@ -287,6 +287,8 @@ async function checkOutreachAndDraft(membershipData, unsubByType) {
   const errors = [];
 
   for (const [type, emails] of Object.entries(unsubByType)) {
+    if (type === 'Alumni') continue; // alumni aren't re-engaged with outreach drafts
+
     const dates = [];
     let drafted = 0, dated = 0, skipped = 0, alreadyDrafted = 0;
 
