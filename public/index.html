@@ -622,12 +622,16 @@ function parseMemRaw() {
   for (let i = dataStart; i < rows.length; i++) {
     const r = rows[i] || [];
     const col0 = (r[0] || '').trim();
+    const col2 = (r[2] || '').trim();
     const col3 = (r[3] || '').trim();
 
-    // Update package when col0 has a real value
+    // Update package when col0 has a real value. Note: no `continue` in any
+    // branch below — a row that updates the package label may *also* be a
+    // real household member's row (see the member-row block further down),
+    // so we always fall through instead of skipping the rest of the loop.
     if (col0 && !SKIP_COL0.has(col0.toLowerCase())) {
       if (col3.includes('(p)')) {
-        // col0 = new package name, col3 = first contact of that package
+        // col0 = new package name, col3 = first (primary) contact of that package
         currentPkgRaw = col0;
         currentPkg = normalisePkg(currentPkgRaw);
       } else if (normalisePkg(col0) !== currentPkg || !currentPkg) {
@@ -644,16 +648,19 @@ function parseMemRaw() {
           currentPkgRaw = combinedRaw;
           currentPkg = combinedPkg;
         }
-        continue;
-      } else {
-        // col0 matches the package we're already in — a repeated label on
-        // a secondary household member's row. Nothing to update.
-        continue;
       }
+      // else: col0 matches the package we're already in — a repeated label
+      // on a household member's row. Nothing to update.
     }
 
-    // Contact row: col3 has "(p)"
-    if (col3.includes('(p)') && currentPkg) {
+    // Member row: col2 (Pass #/Membership ID) is populated on every
+    // household member's name row — the primary ("(p)") and any associated
+    // members (spouse, adult child, etc), not just the primary. Associated
+    // members only become their own CC contact if they have their own
+    // distinct, valid email; if not, they're assumed to share the primary's
+    // household email and are left alone (no email to sync in that case).
+    if (col2 && col3 && currentPkg) {
+      const isPrimary = col3.includes('(p)');
       const nameRaw = col3.replace(/\(p\)/gi,'').replace(/\(S\)/gi,'').trim();
       const nameParts = nameRaw.split(',').map(s => s.trim());
       const lastName  = nameParts[0] || '';
@@ -663,14 +670,20 @@ function parseMemRaw() {
       const emailRow = rows[i + 1] || [];
       const email = (emailRow[3] || '').trim().toLowerCase();
 
+      if (!validEmail(email)) {
+        // Only flag missing/invalid email as a data issue for primaries —
+        // associated members with no email of their own are the normal
+        // case (dependents sharing the household's primary contact).
+        if (isPrimary) skipped++;
+        continue;
+      }
+      if (seen.has(email)) continue;
+      seen.add(email);
+
       const zipRow = rows[i + 3] || [];
       const cityLine = (zipRow[3] || '').trim();
       const zipMatch = cityLine.match(/\b(\d{5})(-\d{4})?\b/);
       const zip = zipMatch ? zipMatch[1] : '';
-
-      if (!validEmail(email)) { skipped++; continue; }
-      if (seen.has(email)) continue;
-      seen.add(email);
 
       // Always store in full list (used for sync-time unsub cross-reference)
       if (!byTypeFull[currentPkg]) byTypeFull[currentPkg] = [];
